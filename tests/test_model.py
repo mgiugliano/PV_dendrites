@@ -120,3 +120,16 @@ def test_sweep_runs_and_is_at_rest():
     # identical passive dendrites near the soma: short and long respond similarly
     s = res.summary.set_index(["morphology", "site_um"])["peak_soma_mV"]
     assert s[("short", 50)] > s[("long", 50)] > 0
+
+
+def test_ca_lva_rates_copy_matches_mod():
+    """mechanism.ca_lva_rates must reproduce the steady states computed by mod/Ca_LVA.mod."""
+    from pvdend.mechanism import ca_lva_rates
+    sec = h.Section(name="calva_probe")
+    sec.insert("Ca_LVA")
+    h.celsius = 34.0
+    for v in (-90.0, -60.0, -40.0, -20.0):
+        h.finitialize(v)
+        m_inf, _, h_inf, _ = ca_lva_rates(v, 34.0)
+        assert sec(0.5).m_Ca_LVA == pytest.approx(float(m_inf), rel=1e-9)
+        assert sec(0.5).h_Ca_LVA == pytest.approx(float(h_inf), rel=1e-9)

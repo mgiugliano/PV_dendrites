@@ -102,7 +102,7 @@ Command line:
 .venv/bin/python scripts/run.py configs/default.json                                # one sweep + overview figure
 .venv/bin/python scripts/run.py configs/default.json --set ca_profile=hotspot hotspot_center_um=300 name=hs300
 .venv/bin/python scripts/make_all_figures.py                                       # every figure in configs/figure_set.json
-.venv/bin/python scripts/make_report.py                                            # all of them in one page: figures/report.html
+.venv/bin/python scripts/make_report.py                                            # all of them in one page, with explanations: figures/report.html
 .venv/bin/python -m pytest                                                         # tests
 ```
 
@@ -137,7 +137,8 @@ src/pvdend/
   calcium.py            dendritic Ca_LVA profiles, somatic Ca_LVA switch, TTX
   protocols.py          synaptic sweep, recordings, measurements, saving/loading
   plotting.py           publication figures (used by scripts and notebook)
-  report.py             single-page HTML report of the whole figure set
+  mechanism.py          analyses explaining where the Ca_LVA event appears (impedance, EPSP duration, thresholds)
+  report.py             single-page HTML report of the whole figure set, with the mechanism section
   gui.py                ipywidgets explorer for the notebook
 scripts/                make_morphology.py, run.py, make_all_figures.py, make_report.py
 configs/                default.json, figure_set.json (+ configs saved from the notebook)

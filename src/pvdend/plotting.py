@@ -360,3 +360,99 @@ def morphology_figure(cells: dict, sites_um=range(50, 401, 50)):
         plot_morphology(ax, cell, basis=basis, sites_um=sites_um)
         ax.set_title(f"{MORPH_STYLE[m]['label']}: tip at {cell.tip_distance:.1f} µm")
     return fig
+
+
+TAU_CMAP = mpl.colors.LinearSegmentedColormap.from_list("tau", ["#9ec2ee", "#2a78d6", "#0d2c55"])
+
+
+def mechanism_figure(D: dict):
+    """Why the Ca_LVA event appears only beyond a distance (data from mechanism.collect)."""
+    from .mechanism import EVENT_CRITERION_MV, SCAN_WEIGHTS
+    set_style()
+    fig, axes = plt.subplots(3, 3, figsize=(TWO_COL, 165 * MM), layout="constrained")
+    a = axes.ravel()
+    g, rest = D["gating"], D["rest_mV"]
+    blue, orange, grey = PROFILE_COLORS["uniform"], PROFILE_COLORS["hotspot"], INK_2
+
+    ax = a[0]
+    ax.plot(g.v, g.m_inf ** 2, color=blue, label="activation m∞²")
+    ax.plot(g.v, g.h_inf, color=orange, label="availability h∞")
+    ax.axvline(rest, color=grey, lw=0.6, ls=":")
+    ax.annotate(f"rest, h∞ = {D['h_rest']:.2f}", (rest, D["h_rest"]), xytext=(4, 8),
+                textcoords="offset points", fontsize=6, color=grey)
+    ax.set(xlabel="V (mV)", ylabel="Steady state", title="Ca$_{LVA}$ gating", xlim=(-100, 20))
+    ax.legend(loc="center right")
+
+    ax = a[1]
+    ax.plot(g.v, g.m_tau, color=blue, label="τ$_m$")
+    ax.plot(g.v, g.h_tau, color=orange, label="τ$_h$")
+    ax.set(xlabel="V (mV)", ylabel="Time constant (ms)", title=f"Ca$_{{LVA}}$ kinetics, {D['cfg'].celsius:g} °C",
+           xlim=(-100, 20), ylim=(0, None))
+    ax.legend(loc="upper right")
+
+    ax = a[2]
+    for m in ("short", "long"):
+        z = D["impedance"][m]
+        st = MORPH_STYLE[m]
+        ax.plot(z.distance_um, z["zin_0Hz_MOhm"], color=st["color"], ls=st["ls"], label=st["label"])
+    ax.axhline(D["impedance"]["long"]["zin_soma_0Hz_MOhm"].iloc[0], color=grey, lw=0.6, ls=":")
+    ax.text(395, D["impedance"]["long"]["zin_soma_0Hz_MOhm"].iloc[0] * 1.15, "soma", ha="right",
+            fontsize=6, color=grey)
+    log_axis(ax)
+    ax.set(xlabel="Distance from soma (µm)", ylabel="Local input impedance (MΩ)",
+           title="Electrotonic load (passive dendrite)", xlim=(0, 405))
+    ax.legend(loc="upper left")
+
+    for ax, col, ylabel, title in ((a[3], "peak_abs_mV", "Peak local V (mV)", "Passive local EPSP: peak"),
+                                   (a[4], "t_above_ms", "Time above −50 mV (ms)", "Passive local EPSP: duration")):
+        for m in ("short", "long"):
+            e = D["epsp"][m]
+            st = MORPH_STYLE[m]
+            ax.plot(e.distance_um, e[col], color=st["color"], ls=st["ls"], marker="o", ms=2, mew=0)
+        ax.set(xlabel="Synapse distance from soma (µm)", ylabel=ylabel, title=title, xlim=(0, 405))
+    a[3].axhline(-40, color=blue, lw=0.6, ls=":")
+    a[3].text(400, -41.5, "Ca$_{LVA}$ m∞ half-activation", fontsize=6, color=blue, ha="right", va="top")
+
+    ax = a[5]
+    th = D["thresholds"]
+    ok = th.threshold_nS.notna()
+    ax.plot(th.distance_um[ok], th.threshold_nS[ok], color=blue, marker="o", ms=3, mew=0)
+    ax.plot(th.distance_um[~ok], [max(SCAN_WEIGHTS)] * int((~ok).sum()), "^", color=grey, ms=4, mew=0)
+    ax.text(th.distance_um[~ok].mean() if (~ok).any() else 100, max(SCAN_WEIGHTS) * 0.82,
+            f"no event up to {max(SCAN_WEIGHTS)} nS", ha="center", fontsize=6, color=grey)
+    ax.axhline(D["cfg"].syn_weight_uS * 1e3, color=grey, lw=0.6, ls=":")
+    ax.set(xlabel="Synapse distance from soma (µm)", ylabel="Threshold synaptic weight (nS)",
+           title="Synaptic strength needed for an event", xlim=(0, 405), ylim=(0, max(SCAN_WEIGHTS) * 1.08))
+
+    ax = a[6]
+    taus = sorted(D["tau"])
+    for i, t in enumerate(taus):
+        df = D["tau"][t]
+        ax.plot(df.distance_um, df.extra_local_mV, color=TAU_CMAP(i / max(len(taus) - 1, 1)),
+                marker="o", ms=2, mew=0, label=f"τ$_{{decay}}$ = {t:g} ms")
+    ax.axhline(EVENT_CRITERION_MV, color=grey, lw=0.6, ls=":")
+    ax.set(xlabel="Synapse distance from soma (µm)", ylabel="Local boost by Ca$_{LVA}$ (mV)",
+           title="Longer EPSPs trigger events closer in", xlim=(0, 405))
+    ax.legend(loc="upper left")
+
+    ex, site = D["example"], D["example_site"]
+    on = D["cfg"].onset_ms
+    ax = a[7]
+    ax.plot(ex["none"]["t"], ex["none"]["v_syn"], color=grey, ls="--", label="no dendritic Ca$_{LVA}$")
+    ax.plot(ex["uniform"]["t"], ex["uniform"]["v_syn"], color=blue, label="uniform Ca$_{LVA}$")
+    ax.set(xlabel="Time (ms)", ylabel="Local V (mV)", title=f"Event at {site:g} µm (5 nS)", xlim=(on - 5, on + 80))
+    ax.legend(loc="upper right")
+
+    ax = a[8]
+    u = ex["uniform"]
+    ax.plot(u["t"], u["m"] ** 2, color=blue, label="m²")
+    ax.plot(u["t"], u["h"], color=orange, label="h")
+    ax.plot(u["t"], u["m"] ** 2 * u["h"] / max((u["m"] ** 2 * u["h"]).max(), 1e-12), color=INK, lw=0.8,
+            label="m²h (normalised)")
+    ax.set(xlabel="Time (ms)", ylabel="Gate", title="Activation, then inactivation", xlim=(on - 5, on + 80),
+           ylim=(0, 1.05))
+    ax.legend(loc="upper right")
+
+    for ax, letter in zip(a, "abcdefghi"):
+        panel_label(ax, letter)
+    return fig
