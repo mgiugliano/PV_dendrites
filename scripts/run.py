@@ -1,0 +1,43 @@
+"""Run one sweep from a JSON config, save results/ and an overview figure.
+
+    python scripts/run.py configs/default.json
+    python scripts/run.py configs/default.json --set ca_profile=hotspot hotspot_center_um=300
+"""
+import argparse
+import json
+
+from _common import progress
+
+from pvdend import Config, get_cell, load_or_run, plotting
+
+
+def parse_value(text):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("config", help="JSON config file")
+    ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE",
+                    help="override config fields (values parsed as JSON)")
+    ap.add_argument("--force", action="store_true", help="re-run even if saved results match")
+    args = ap.parse_args()
+
+    cfg = Config.from_json(args.config)
+    overrides = dict(kv.split("=", 1) for kv in args.set)
+    if overrides:
+        cfg = cfg.replace(**{k: parse_value(v) for k, v in overrides.items()})
+    print(cfg.to_json())
+
+    res = load_or_run(cfg, force=args.force, progress=progress)
+    cells = {m: get_cell(m, cfg) for m in cfg.morphologies}
+    fig = plotting.overview_figure(res, cells)
+    for p in plotting.save_figure(fig, f"overview_{cfg.name}"):
+        print("saved", p)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,28 @@
+{
+  "figures": [
+    {
+      "name": "single_peak",
+      "base": "default.json",
+      "overrides": {"ca_norm": "peak"},
+      "profiles": ["none", "uniform", "hotspot", "increasing", "decreasing"]
+    },
+    {
+      "name": "single_total",
+      "base": "default.json",
+      "overrides": {"ca_norm": "total"},
+      "profiles": ["none", "uniform", "hotspot", "increasing", "decreasing"]
+    },
+    {
+      "name": "train5x50Hz_peak",
+      "base": "default.json",
+      "overrides": {"ca_norm": "peak", "n_events": 5, "freq_hz": 50.0},
+      "profiles": ["none", "uniform", "hotspot", "increasing", "decreasing"]
+    },
+    {
+      "name": "single_peak_TTX_noSomaCa",
+      "base": "default.json",
+      "overrides": {"ca_norm": "peak", "ttx": true, "somatic_ca_lva": false},
+      "profiles": ["none", "uniform", "hotspot", "increasing", "decreasing"]
+    }
+  ]
+}

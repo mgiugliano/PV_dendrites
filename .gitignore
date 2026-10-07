@@ -1,0 +1,22 @@
+# Compiled NEURON mechanisms (rebuild with: nrnivmodl mod)
+arm64/
+x86_64/
+aarch64/
+i686/
+nrnmech.dll
+
+# Simulation output (regenerate with scripts/)
+results/
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+.pytest_cache/
+*.egg-info/
+.DS_Store
+
+# Figures: keep PDF/PNG/HTML in git, SVG is regenerated on demand
+figures/**/*.svg
+figures/*.svg

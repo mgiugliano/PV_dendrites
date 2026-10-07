@@ -1,0 +1,36 @@
+{
+  "description": "Target dendrite of HL23PV: terminal path with tip closest to 100 um",
+  "distance_origin": "soma[0](0.5), path distance",
+  "short": {
+    "file": "HL23PV.swc",
+    "tip_swc_id": 40988,
+    "tip_xyz": [
+      710.046509,
+      519.524719,
+      11.2725
+    ],
+    "tip_distance_um": 100.8082,
+    "path_sections": [
+      "dend[27]",
+      "dend[29]",
+      "dend[30]"
+    ]
+  },
+  "long": {
+    "file": "HL23PV_dend400.swc",
+    "tip_xyz": [
+      883.180081,
+      428.641301,
+      -198.036141
+    ],
+    "tip_distance_um": 400.0,
+    "growth": {
+      "from_swc_id": 40988,
+      "added_um": 299.1918,
+      "step_um": 5.0,
+      "jitter_sd": 0.1,
+      "seed": 42,
+      "radius_um": 0.2162
+    }
+  }
+}
