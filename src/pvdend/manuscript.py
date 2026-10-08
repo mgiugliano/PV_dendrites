@@ -470,8 +470,11 @@ at the tip (Fig. 4e), while its peak levelled off as the membrane approached the
                 + ", ".join(f"{far[c]:.3f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c in far.index) + "."
                 + (f" For a synapse at 300 µm, shifted-activation Ca<sub>LVA</sub> ({noise_split['inc']}) increased the "
                    f"extra spikes both within 20 ms of the input ({noise_split['e0']:.3f} → {noise_split['e1']:.3f}) and "
-                   f"in the following 20–60 ms ({noise_split['l0']:.3f} → {noise_split['l1']:.3f}), consistent with the slow "
-                   "dendritic depolarisation prolonging the time window in which the synapse can fire the cell."
+                   f"in the following 20–60 ms ({noise_split['l0']:.3f} → {noise_split['l1']:.3f}). In the absence of noise, the "
+                   "Ca<sub>LVA</sub> current started within about 1 ms of the input and changed the somatic potential "
+                   "during the rising phase of the EPSP, but its regenerative depolarisation peaked at the soma about "
+                   "20 ms after the input; the dendritic channels thus both amplify the EPSP and prolong the time window "
+                   "in which the synapse can fire the cell."
                    if noise_split else ""))
     out += "</p>"
     out += """

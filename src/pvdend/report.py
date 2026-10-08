@@ -376,8 +376,10 @@ def noise_html(spikes, examples, S: dict) -> str:
     site = N["example_site_um"]
     split = "".join(f"<tr><td>{c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')}</td><td>{el.early[(c, site)]:.3f}</td>"
                     f"<td>{el.late[(c, site)]:.3f}</td></tr>" for c in dict.fromkeys(ev.condition) if (c, site) in el.index)
-    table += ("<p>The PSTHs show two components: an early one, within about 20 ms of the input, driven by the synaptic "
-              "EPSP, and a later one that the slow dendritic Ca<sub>LVA</sub> depolarisation enlarges. For a synapse at "
+    table += ("<p>Dendritic Ca<sub>LVA</sub> starts to add current within about 1 ms of the input, while the EPSP is "
+              "still rising, and its regenerative depolarisation reaches the soma later and lasts longer than the passive "
+              "EPSP. It therefore increases the extra spikes both in the first 20 ms and, even more, in the following "
+              "tens of milliseconds. For a synapse at "
               f"{site:g} µm, extra spikes per input:</p><div class='tablewrap'><table><thead><tr><th>Condition</th>"
               f"<th>0–20 ms</th><th>20–{N['count_window_ms'][1]:g} ms</th></tr></thead><tbody>{split}</tbody></table></div>")
     base_rate = np.mean([np.mean([len(x[(x >= -50) & (x < 0)]) for x in spikes[k]]) / 0.05
