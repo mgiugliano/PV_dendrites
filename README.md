@@ -1,14 +1,21 @@
 # PV_dendrites
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mgiugliano/PV_dendrites/blob/main/notebooks/explore.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mgiugliano/PV_dendrites/blob/main/notebooks/figures.ipynb) **Every figure, step by step** (`notebooks/figures.ipynb`)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mgiugliano/PV_dendrites/blob/main/notebooks/explore.ipynb) **Interactive explorer** (`notebooks/explore.ipynb`)
 
 Simulations of a human layer 2/3 parvalbumin-positive (PV+) interneuron model. They
 compare how an excitatory synapse along one dendrite is felt at the soma when that
 dendrite is short (100 µm, as reconstructed) or grown to 400 µm. In the long dendrite,
 low-voltage-activated Ca²⁺ channels (Ca<sub>LVA</sub>) can be switched on with
-different spatial distributions.
+different spatial distributions, densities and activation ranges.
 
-Click the **Open in Colab** button above to run the interactive notebook in your browser, with nothing to install.
+Two notebooks run in the browser on Google Colab, with nothing to install:
+
+* **`figures.ipynb`** regenerates every figure of the report in order, each preceded by an explanation of
+  the methods with equations. Run it top to bottom. With `QUICK = True` (default) it takes about 40
+  minutes on a laptop (1–1.5 hours on Colab); with `QUICK = False` it reproduces the report figures exactly (several hours).
+* **`explore.ipynb`** has widgets (dropdowns, sliders, buttons) to run any condition interactively.
 
 ## The model
 
@@ -146,7 +153,9 @@ src/pvdend/
   gui.py                ipywidgets explorer for the notebook
 scripts/                make_morphology.py, run.py, make_all_figures.py, make_report.py
 configs/                default.json, studies.json (+ configs saved from the notebook)
-notebooks/explore.ipynb interactive notebook (local and Colab)
+notebooks/figures.ipynb step-by-step notebook that regenerates every figure (local and Colab)
+notebooks/explore.ipynb interactive notebook with widgets (local and Colab)
+scripts/notebook_sources/  the scripts that generate the two notebooks
 figures/                generated figures and report.html
 tests/                  pytest suite
 ```

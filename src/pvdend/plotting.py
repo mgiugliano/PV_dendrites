@@ -1,4 +1,29 @@
-"""Publication-quality figures. The notebook and scripts/ use exactly these functions."""
+"""Publication-quality figures. The report, the scripts and both notebooks use exactly these functions.
+
+Conventions
+-----------
+* Sizes follow Nature column widths (89 and 183 mm), 7 pt Arial/Helvetica text, vector output (PDF/SVG,
+  fonts kept as text) plus a 600 dpi PNG; `set_style()` applies them, `save_figure()` writes all formats.
+* Colours carry identity, always the same: short cell = dashed dark grey, long cell without dendritic
+  Ca_LVA = black or dark grey, uniform Ca_LVA = blue, increasing Ca_LVA = green; original kinetics are
+  dotted and shifted kinetics solid where both appear. Synapse distance uses a single-hue blue scale.
+* Every figure function takes simulation results (pvdend.protocols.Result objects or the dictionaries
+  returned by pvdend.studies / pvdend.mechanism) and returns a matplotlib Figure; nothing is simulated here.
+
+Figure functions and where they are used
+----------------------------------------
+dendrogram_figure     Figure 1        morphology of the short and long cells
+diameter_figure       Suppl. S1       diameter and membrane area of the target dendrite
+electrotonic_figure   Figure 2        impedance along the dendrite, EPSP integral and time constants
+factorial_figure      Figure 3, S3    somatic EPSP and Ca_LVA boost for every density x kinetics (single events, trains)
+mechanism_figure      Figure 4        why only some synapses trigger a Ca_LVA event
+noise_figure          Figure 5        firing with a noisy somatic current (traces, cumulative extra spikes, PSTH)
+mouth_figure          Suppl. S2       effect of the wider proximal diameter
+spike_traces_figure   Suppl. S4       action potentials with a steady somatic bias
+firing_figure         report          spikes and boost for every bias level
+overview_figure       report          per-condition detail (dendrograms, traces, distance dependence)
+comparison_figure, site_figure, morphology_figure   used by the interactive explorer notebook
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,7 +35,7 @@ from matplotlib.collections import LineCollection
 
 from ._paths import FIGURES_DIR
 
-MM = 1 / 25.4
+MM = 1 / 25.4  # matplotlib sizes are in inches
 ONE_COL, TWO_COL = 89 * MM, 183 * MM  # Nature column widths
 
 INK = "#0b0b0b"
@@ -42,6 +67,7 @@ METRIC_LABELS = {
 
 
 def set_style():
+    """Matplotlib settings for publication figures (font sizes, line widths, embedded fonts)."""
     mpl.rcParams.update({
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
@@ -59,11 +85,13 @@ def set_style():
 
 
 def panel_label(ax, letter):
+    """Bold lower-case panel letter at the top-left corner of `ax`."""
     ax.text(-0.02, 1.02, letter, transform=ax.transAxes, fontsize=8, fontweight="bold",
             ha="right", va="bottom")
 
 
 def save_figure(fig, stem, folder=None, formats=("pdf", "svg", "png")) -> list[Path]:
+    """Save `fig` as <stem>.pdf/.svg/.png in `folder` (default: figures/); returns the paths."""
     folder = Path(folder or FIGURES_DIR)
     folder.mkdir(parents=True, exist_ok=True)
     paths = []
@@ -78,6 +106,7 @@ def save_figure(fig, stem, folder=None, formats=("pdf", "svg", "png")) -> list[P
 # --- morphology -------------------------------------------------------------------------
 
 def _xyz(sec):
+    """3D points of a section and their normalised arc length (0 at the start, 1 at the end)."""
     pts = np.array([[sec.x3d(i), sec.y3d(i), sec.z3d(i)] for i in range(sec.n3d())])
     arc = np.array([sec.arc3d(i) for i in range(sec.n3d())]) / sec.L
     return pts, arc
@@ -155,6 +184,7 @@ def plot_morphology(ax, cell, gbar=None, sites_um=None, gmax=None, scalebar_um=1
 # --- data panels -------------------------------------------------------------------------
 
 def plot_ca_profile(ax, result, color=None, fill=True):
+    """Dendritic Ca_LVA density along the long target dendrite."""
     prof = result.ca_profiles.get("long")
     if prof is None:
         return
@@ -186,6 +216,7 @@ def plot_traces(ax, result, morph, where="soma", sites_um=None, xlim=None):
 
 
 def log_axis(ax):
+    """Logarithmic y axis with plain-number tick labels."""
     ax.set_yscale("log")
     ax.yaxis.set_major_locator(mpl.ticker.LogLocator(subs=(1, 2, 5)))
     ax.yaxis.set_major_formatter(mpl.ticker.FormatStrFormatter("%g"))
@@ -193,6 +224,7 @@ def log_axis(ax):
 
 
 def plot_vs_distance(ax, result, metric, morphs=None, color=None, label=None, **kw):
+    """A measure (column `metric` of the summary) against synapse distance, one line per morphology."""
     df = result.summary
     for morph in morphs or result.config.morphologies:
         sub = df[df.morphology == morph].sort_values("site_um")
@@ -210,6 +242,7 @@ def plot_vs_distance(ax, result, metric, morphs=None, color=None, label=None, **
 # --- composite figures ---------------------------------------------------------------------
 
 def ca_label(cfg) -> str:
+    """Short description of the dendritic Ca_LVA condition of a Config."""
     if cfg.ca_profile == "none":
         return "none"
     kin = "original kinetics" if cfg.ca_act_shift_mV == 0 else f"activation shifted {cfg.ca_act_shift_mV:g} mV"
@@ -217,6 +250,7 @@ def ca_label(cfg) -> str:
 
 
 def describe(cfg) -> str:
+    """One-line description of a Config for figure titles."""
     ca = ca_label(cfg)
     stim = ("single event" if cfg.n_events == 1
             else f"{cfg.n_events} events at {cfg.freq_hz:g} Hz")
@@ -481,6 +515,7 @@ def _dendro_layout(cell):
     layout, next_y = {}, [0.0]
 
     def place(sec):
+        """Recursively assign y positions: leaves get consecutive rows, parents the mean of their children."""
         kids = children(sec)
         ys = [place(k) for k in kids]
         y = float(np.mean(ys)) if ys else next_y[0]
@@ -496,6 +531,7 @@ def _dendro_layout(cell):
 
 
 def _parent_or_none(sec):
+    """The parent section of `sec`, or None."""
     from .morphology import parent
     return parent(sec)
 
@@ -578,6 +614,7 @@ def dendrogram_figure(cells: dict, gbar=None, gmax=None):
 
 
 def mouth_cell_scale(cell) -> float:
+    """Diameter scale of the target dendrite's proximal end for a cell (1 if not widened)."""
     return getattr(cell, "mouth_scale", 1.0)
 
 
@@ -589,6 +626,7 @@ def diameter_figure(cells: dict, mouth_cell=None):
     ref = cells.get("long") or next(iter(cells.values()))
 
     def profile(cell, path):  # reconstruction points: (path distance, diameter)
+        """Reconstruction points of a path as (path distance, diameter) lists."""
         d, dia = [], []
         for sec in path:
             d0 = cell.distance(sec(0))
@@ -741,6 +779,7 @@ def spike_traces_figure(study: dict, frac: float, profiles=("none", "uniform", "
 # --- figures of the factorial design -----------------------------------------------------------------
 
 def _cond_title(shift, g):
+    """Panel title for a density / activation condition."""
     kin = "original kinetics" if shift == 0 else f"activation {shift:g} mV"
     return f"{g:g} mS/cm², {kin}"
 
@@ -875,6 +914,7 @@ NOISE_STYLE_BASE = {"short": dict(color=INK_2, ls="--"), "long, no Ca_LVA": dict
 
 
 def noise_style(cond: str) -> dict:
+    """Line style of a condition in the noise figure (colour = profile, dotted = original kinetics)."""
     if cond in NOISE_STYLE_BASE:
         return dict(NOISE_STYLE_BASE[cond])
     prof = "increasing" if "increasing" in cond else "uniform"

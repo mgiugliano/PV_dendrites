@@ -194,5 +194,6 @@ def collect(cfg: Config) -> dict:
 
 
 def onset_um(extra: pd.DataFrame, criterion=EVENT_CRITERION_MV) -> float:
+    """Most proximal synapse site with a Ca_LVA event (boost > criterion at the synapse or tip), or NaN."""
     hit = extra[np.maximum(extra.extra_local_mV, extra.extra_tip_mV) > criterion].distance_um
     return float(hit.min()) if len(hit) else np.nan

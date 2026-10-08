@@ -37,6 +37,7 @@ VSHIFT_KV3_1 = 0  # GLOBAL in Kv3_1.mod
 
 
 def _set(sec, params):
+    """Assign every `name: value` of `params` to the section (e.g. gbar_NaTg = 0.5 sets it in all its segments)."""
     for name, value in params.items():
         setattr(sec, name, value)
 
@@ -55,18 +56,25 @@ class PVCell:
 
     def __init__(self, morphology="short", prune_side_branches=False, max_seg_len_um=2.0,
                  swc_path=None, tip_xyz=None, mouth_scale=1.0, mouth_length_um=13.0):
+        """Build the cell: load the SWC, set the segmentation, find (and optionally prune or widen) the
+        target dendrite, replace the axon and insert the biophysics, in the order of the original HOC code."""
         ensure_mechanisms()
         self.label = morphology
         self.mouth_scale = mouth_scale
         self.soma, self.dend, self.apic, self.axon = [], [], [], []
 
+        # Which file, and where the target dendrite ends (its tip coordinates identify it in either file).
         if swc_path is None:
             meta = morph.load_target_meta()[morphology]
             swc_path, tip_xyz = morph.morphology_file(morphology), meta["tip_xyz"]
 
+        # 1. Morphology and the original segmentation (NeuronTemplate.hoc: init, geom_nseg).
         self._load_morphology(swc_path)
         self.geom_nseg()
 
+        # 2. The target dendrite: the sections from the soma to the tip at tip_xyz, optionally without side
+        #    branches or with a wider proximal end, and with finer segments (max_seg_len_um) to resolve
+        #    synapse positions and channel-density profiles along it.
         self.target_path, self.pruned = [], []
         if tip_xyz is not None:
             tip = morph.find_tip_section(self, tip_xyz)
@@ -76,17 +84,20 @@ class PVCell:
             if mouth_scale != 1.0:
                 self._widen_mouth(mouth_scale, mouth_length_um)
             if max_seg_len_um:
-                for sec in self.target_path:
+                for sec in self.target_path:  # odd nseg, so that a segment is centred on x = 0.5
                     sec.nseg = max(sec.nseg, 2 * int(sec.L / max_seg_len_um / 2) + 1)
 
+        # 3. Axon stub and biophysics, as in the original model (delete_axon_BPO, biophys_HL23PV).
         self.delete_axon_BPO()
         self.biophys()
 
     def __str__(self):
+        """Name used by NEURON for the sections of this cell (e.g. 'PVCell_long.dend[30]')."""
         return f"PVCell_{self.label}"
 
     # --- NeuronTemplate.hoc ---------------------------------------------------------
     def _load_morphology(self, swc_path):
+        """Read the SWC file with NEURON's Import3d, which creates soma, dend and axon sections on this object."""
         reader = h.Import3d_SWC_read()
         reader.quiet = 1
         reader.input(str(swc_path))
@@ -94,6 +105,7 @@ class PVCell:
         self._rebuild_lists()
 
     def _rebuild_lists(self):
+        """(Re)build the NEURON SectionLists all/somatic/basal/apical/axonal from the Python section lists."""
         self.all, self.somatic, self.basal = h.SectionList(), h.SectionList(), h.SectionList()
         self.apical, self.axonal = h.SectionList(), h.SectionList()
         for group, lst in ((self.soma, self.somatic), (self.dend, self.basal),
@@ -103,11 +115,15 @@ class PVCell:
                 self.all.append(sec)
 
     def geom_nseg(self):
+        """Original segmentation rule: an odd number of segments, 1 + 2·int(L/40 µm), for every section."""
         self.soma[0](0.5).area()  # make sure diam reflects 3d points
         for sec in self.all:
             sec.nseg = 1 + 2 * int(sec.L / 40)
 
     def delete_axon_BPO(self):
+        """Replace the reconstructed axon by two 30 µm cylinders (the BluePyOpt 'AIS stub' of the original
+        model), taking their diameters from the first axon section and from the first section beyond 60 µm."""
+        # Diameters of the two stub sections, from the reconstructed axon (default 1 µm if there is none).
         if len(self.axon) == 0:
             d1 = d2 = 1
         elif len(self.axon) == 1:
@@ -118,6 +134,7 @@ class PVCell:
                 if h.distance(self.soma[0](0.5), sec(0.5)) > 60:
                     d2 = sec.diam
                     break
+        # Replace the reconstructed axon by two 30 µm, single-segment cylinders attached to the soma.
         for sec in self.axon:
             h.delete_section(sec=sec)
         self.axon = [h.Section(name=f"axon[{i}]", cell=self) for i in range(2)]
@@ -129,11 +146,13 @@ class PVCell:
 
     # --- biophys_HL23PV.hoc ---------------------------------------------------------
     def biophys(self):
-        for sec in self.all:
+        """Insert the passive membrane and I_h everywhere, and the active channels in the soma and the axon,
+        with the parameter values of models/biophys_HL23PV.hoc (the dendrites stay passive)."""
+        for sec in self.all:  # everywhere: leak, I_h, Ra and cm
             sec.insert("pas")
             sec.insert("Ih")
             _set(sec, ALL)
-        for lst, params in ((self.somatic, SOMATIC), (self.axonal, AXONAL)):
+        for lst, params in ((self.somatic, SOMATIC), (self.axonal, AXONAL)):  # soma and axon: active channels
             for sec in lst:
                 for mech in ACTIVE_MECHS:
                     sec.insert(mech)
@@ -142,6 +161,7 @@ class PVCell:
 
     # --- optional modification of the target dendrite ----------------------------------
     def _prune(self, roots):
+        """Delete the side branches `roots` and their subtrees, so that the target dendrite becomes unbranched."""
         doomed = [s for r in roots for s in morph.subtree(r)]
         self.pruned = [s.name() for s in doomed]
         keep = [s for s in self.dend if all(s != d for d in doomed)]  # before deleting
@@ -163,10 +183,12 @@ class PVCell:
 
     # --- convenience ---------------------------------------------------------------
     def distance(self, seg) -> float:
+        """Path distance (µm) from the centre of the soma, soma[0](0.5), to the segment `seg`."""
         return morph.soma_distance(self, seg)
 
     @property
     def tip_distance(self) -> float:
+        """Path distance (µm) from the soma to the tip of the target dendrite."""
         return self.distance(self.target_path[-1](1))
 
     def path_segments(self):

@@ -16,6 +16,7 @@ ORIGINAL = "#0b0b0b"
 
 
 def _xyz(sec, x0=0.0, x1=1.0):
+    """3D points of a section between normalised positions x0 and x1 (interpolated at both ends)."""
     n = sec.n3d()
     arc = np.array([sec.arc3d(i) for i in range(n)]) / sec.L
     pts = np.array([[sec.x3d(i), sec.y3d(i), sec.z3d(i)] for i in range(n)])
@@ -25,6 +26,7 @@ def _xyz(sec, x0=0.0, x1=1.0):
 
 
 def _trace(polylines, name, color, width, legendgroup=None, showlegend=True):
+    """One plotly 3D line trace for a list of polylines (separated by gaps)."""
     xs, ys, zs = [], [], []
     for p in polylines:
         xs += list(p[:, 0]) + [None]

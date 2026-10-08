@@ -27,28 +27,34 @@ def load_target_meta() -> dict:
 
 
 def morphology_file(morph: str) -> str:
+    """Path of the SWC file of morphology 'short' or 'long'."""
     return str(MORPH_DIR / load_target_meta()[morph]["file"])
 
 
 def soma_distance(cell, seg) -> float:
+    """Path distance (µm) from soma[0](0.5) to `seg`."""
     return h.distance(cell.soma[0](0.5), seg)
 
 
 def end_xyz(sec) -> np.ndarray:
+    """Coordinates (µm) of the last 3D point of a section, i.e. its distal end."""
     n = sec.n3d() - 1
     return np.array([sec.x3d(n), sec.y3d(n), sec.z3d(n)])
 
 
 def children(sec) -> list:
+    """The sections attached to `sec`."""
     return list(h.SectionRef(sec=sec).child)
 
 
 def parent(sec):
+    """The section `sec` is attached to (None for the soma)."""
     ref = h.SectionRef(sec=sec)
     return ref.parent if ref.has_parent() else None
 
 
 def leaves(cell) -> list:
+    """All terminal basal sections (dendritic tips)."""
     return [sec for sec in cell.basal if not children(sec)]
 
 
@@ -79,6 +85,7 @@ def side_branches(cell, path) -> list:
 
 
 def subtree(sec) -> list:
+    """`sec` and every section distal to it."""
     out = [sec]
     for c in children(sec):
         out.extend(subtree(c))
@@ -105,6 +112,7 @@ def path_location(cell, path, distance_um):
 # --- SWC growth -----------------------------------------------------------------
 
 def read_swc(path) -> tuple[list[str], dict]:
+    """Read an SWC file: (all lines, {id: {type, xyz, r, parent}})."""
     lines, nodes = [], {}
     with open(path) as f:
         for line in f:
@@ -119,6 +127,7 @@ def read_swc(path) -> tuple[list[str], dict]:
 
 
 def swc_node_at(nodes: dict, xyz, node_type=3) -> int:
+    """Id of the SWC node (of type `node_type`, 3 = basal dendrite) located at `xyz` (to 1 nm)."""
     ids = [i for i, n in nodes.items() if n["type"] == node_type]
     d = [np.linalg.norm(nodes[i]["xyz"] - np.asarray(xyz)) for i in ids]
     k = int(np.argmin(d))

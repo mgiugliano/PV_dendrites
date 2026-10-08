@@ -21,15 +21,22 @@ KIN_LABEL = {0.0: "original kinetics", -15.0: "activation shifted by −15 mV"}
 
 
 def spec(set_file=None) -> dict:
+    """The study definition: configs/studies.json as a dict."""
     return json.loads((set_file or CONFIG_DIR / "studies.json").read_text())
 
 
 def base_config(S=None) -> Config:
+    """The base Config of all studies: configs/<S['base']>, with optional S['base_overrides'] applied.
+
+    The overrides let a caller (e.g. the notebook's quick mode) coarsen the site spacing without
+    editing the configuration files.
+    """
     S = S or spec()
-    return Config.from_json(CONFIG_DIR / S["base"])
+    return Config.from_json(CONFIG_DIR / S["base"]).replace(**S.get("base_overrides", {}))
 
 
 def _name(kind, prof, shift=0.0, g=1.0, mouth=1.0, frac=0.0):
+    """Result-folder name of a condition (e.g. 'single_g2.5_m1_s-15__uniform')."""
     if prof == "none":  # independent of Ca_LVA settings
         tag = f"m{mouth:g}"
     else:
@@ -40,6 +47,7 @@ def _name(kind, prof, shift=0.0, g=1.0, mouth=1.0, frac=0.0):
 
 
 def _cfg(base, kind_overrides, kind, prof, shift, g, mouth, frac=0.0):
+    """The Config of one condition: base settings, protocol overrides, profile, density, shift, mouth, bias."""
     c = base.replace(**kind_overrides, ca_profile=prof, mouth_scale=mouth, soma_bias_frac=frac)
     if prof != "none":
         c = c.replace(ca_act_shift_mV=shift, g_ca_mS_cm2=g)
@@ -130,7 +138,9 @@ def noise_study(S=None, progress=None):
     N = S["noise"]
     folder = RESULTS_DIR / "noise_psth"
     folder.mkdir(parents=True, exist_ok=True)
-    key = json.dumps(N, sort_keys=True)
+    key = json.dumps(N, sort_keys=True)  # results are reused only if these parameters are unchanged
+    # 1. List the blocks to simulate: for every condition and synapse site (and 'no synapse'), n_blocks
+    #    simulations with seeds 1000, 1001, ...; skip those already saved with the same parameters.
     jobs, cached = [], {}
     for label, morph, cfg in noise_conditions(S):
         cell_tip = get_cell(morph, cfg).tip_distance
@@ -142,6 +152,8 @@ def noise_study(S=None, progress=None):
             else:
                 jobs += [(label, morph, cfg.to_json(), site, b, N) for b in range(N["n_blocks"])]
                 cached[(label, site)] = (path, meta, key + cfg.to_json())
+    # 2. Run the missing blocks in parallel worker processes ('spawn': each worker starts a clean Python
+    #    and builds its own cells, so NEURON state is never shared between processes).
     results = {}
     if jobs:
         ctx = mp.get_context("spawn")
@@ -150,6 +162,9 @@ def noise_study(S=None, progress=None):
                 results.setdefault((res["label"], res["site"]), []).append(res)
                 if progress:
                     progress(f"noise block {i + 1}/{len(jobs)}")
+    # 3. Save the new blocks, then cut every block into its inputs: spike times relative to each input,
+    #    within the PSTH window. Input j of a block with the synapse and input j of the same block without
+    #    it share the noise, which makes paired differences possible.
     spikes, examples = {}, {}
     on, k, period = N["warmup_ms"], N["inputs_per_block"], N["period_ms"]
     w0, w1 = N["psth_window_ms"]

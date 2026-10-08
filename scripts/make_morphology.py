@@ -17,13 +17,14 @@ from pvdend import morphology as morph  # noqa: E402
 from pvdend._paths import MORPH_DIR, TARGET_META  # noqa: E402
 from pvdend.cell import PVCell  # noqa: E402
 
-SHORT_TARGET_UM = 100.0
-LONG_TIP_UM = 400.0
+SHORT_TARGET_UM = 100.0  # choose the terminal path whose tip is closest to this distance
+LONG_TIP_UM = 400.0  # grow it until its tip lies this far from the soma (path distance)
 ORIGINAL = MORPH_DIR / "HL23PV.swc"
 GROWN = MORPH_DIR / "HL23PV_dend400.swc"
 
 
 def main():
+    # 1. Load the original cell (no target dendrite yet) and pick the tip closest to 100 um.
     cell = PVCell(swc_path=ORIGINAL)
     tip_sec = min(morph.leaves(cell),
                   key=lambda s: abs(cell.distance(s(1)) - SHORT_TARGET_UM))
@@ -33,15 +34,18 @@ def main():
     print("target path:", " -> ".join(s.name().split(".")[-1] for s in path),
           f"| tip at {short_tip_um:.3f} um")
 
+    # 2. Find that tip among the SWC nodes and grow it by the missing length (random walk, constant radius).
     _, nodes = morph.read_swc(ORIGINAL)
     tip_id = morph.swc_node_at(nodes, short_xyz)
     extra = LONG_TIP_UM - short_tip_um
     long_xyz = morph.grow_swc(ORIGINAL, GROWN, tip_id, extra)
 
+    # 3. Reload the grown cell and check the new tip distance (it should be exactly 400 um).
     long_cell = PVCell(swc_path=GROWN, tip_xyz=long_xyz)
     print(f"grown by {extra:.3f} um -> tip at {long_cell.tip_distance:.3f} um "
           f"({len(long_cell.target_path)} sections on the path)")
 
+    # 4. Record how the target dendrite is found in each file (tip coordinates) and how it was grown.
     meta = {
         "description": "Target dendrite of HL23PV: terminal path with tip closest to 100 um",
         "distance_origin": "soma[0](0.5), path distance",

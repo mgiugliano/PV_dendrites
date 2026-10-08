@@ -20,3 +20,7 @@ __pycache__/
 # Figures: keep PDF/PNG/HTML in git, SVG is regenerated on demand
 figures/**/*.svg
 figures/*.svg
+
+# Quick-mode outputs of notebooks/figures.ipynb
+results_quick/
+figures_quick/

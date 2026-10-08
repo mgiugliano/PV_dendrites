@@ -21,6 +21,7 @@ SOMA_CADYN_DECAY = 531.0255920416845
 
 @dataclass
 class Config:
+    """All parameters of one simulation sweep (see the comments next to each field for units and meaning)."""
     name: str = "default"
     morphologies: list = field(default_factory=lambda: ["short", "long"])
 
@@ -66,6 +67,7 @@ class Config:
     t_post_ms: float = 150.0  # simulated time after the last event
 
     def __post_init__(self):
+        """Validate the parameters as soon as a Config is created (raises ValueError)."""
         if self.ca_profile not in CA_PROFILES:
             raise ValueError(f"ca_profile must be one of {CA_PROFILES}")
         if self.mouth_scale <= 0 or self.mouth_length_um <= 0:
@@ -82,16 +84,20 @@ class Config:
 
     @property
     def interval_ms(self) -> float:
+        """Interval between synaptic events of a train (ms)."""
         return 1000.0 / self.freq_hz
 
     @property
     def tstop_ms(self) -> float:
+        """Total simulated time: onset, the train, and t_post_ms after the last event (ms)."""
         return self.onset_ms + (self.n_events - 1) * self.interval_ms + self.t_post_ms
 
     def replace(self, **changes) -> "Config":
+        """A copy of this Config with some fields changed, e.g. cfg.replace(ca_profile='uniform')."""
         return Config(**{**asdict(self), **changes})
 
     def to_json(self, path: str | Path | None = None) -> str:
+        """The Config as JSON text (also written to `path` if given)."""
         text = json.dumps(asdict(self), indent=2)
         if path is not None:
             Path(path).write_text(text + "\n")
@@ -99,6 +105,7 @@ class Config:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
+        """Build a Config from a dict; unknown keys raise an error, missing keys take their defaults."""
         known = {f.name for f in fields(cls)}
         unknown = set(d) - known
         if unknown:
@@ -107,4 +114,5 @@ class Config:
 
     @classmethod
     def from_json(cls, path: str | Path) -> "Config":
+        """Read a Config from a JSON file."""
         return cls.from_dict(json.loads(Path(path).read_text()))

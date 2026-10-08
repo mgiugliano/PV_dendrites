@@ -16,12 +16,14 @@ import pandas
 import plotly
 
 from . import mechanism
-from .cell import ALL, SOMATIC
+from .cell import ALL, AXONAL, SOMATIC
 from .config import Config
 from .morphology import load_target_meta, path_geometry, side_branches
 from .protocols import RHEOBASE_STEP_MS
 
 REPO_URL = "https://github.com/mgiugliano/PV_dendrites"
+COLAB_FIG_URL = ("https://colab.research.google.com/github/mgiugliano/PV_dendrites/blob/main/"
+                 "notebooks/figures.ipynb")
 COLAB_URL = ("https://colab.research.google.com/github/mgiugliano/PV_dendrites/blob/main/"
              "notebooks/explore.ipynb")
 
@@ -79,10 +81,12 @@ _IDX = {key: i + 1 for i, (key, _, _) in enumerate(REFERENCES)}
 
 
 def cite(*keys) -> str:
+    """Numbered citation '[n,m]' for the given reference keys (sorted)."""
     return "[" + ",".join(str(i) for i in sorted(_IDX[k] for k in keys)) + "]"
 
 
 def references_html() -> str:
+    """The numbered reference list with DOI links."""
     items = "".join(f"<li id='ref-{k}'>{text} doi:<a href='https://doi.org/{doi}'>{doi}</a></li>"
                     for k, text, doi in REFERENCES)
     return f"<h2 id='references'>References</h2><ol class='refs'>{items}</ol>"
@@ -91,12 +95,17 @@ def references_html() -> str:
 # --- helpers ------------------------------------------------------------------------------------
 
 def _v(res, morph, site, col):
-    df = res.summary
-    row = df[(df.morphology == morph) & np.isclose(df.site_um, site)]
-    return float(row[col].iloc[0]) if len(row) else np.nan
+    """Value of column `col` for the synapse at `site` in morphology `morph` (nearest simulated site within
+    half a site step; NaN if none)."""
+    df = res.summary[res.summary.morphology == morph]
+    if df.empty:
+        return np.nan
+    i = int(np.argmin(np.abs(df.site_um.to_numpy() - site)))
+    return float(df[col].iloc[i]) if abs(df.site_um.iloc[i] - site) <= res.config.site_step_um / 2 + 1e-6 else np.nan
 
 
 def _events(results, prof, crit=mechanism.EVENT_CRITERION_MV):
+    """Synapse sites whose input triggers a Ca_LVA event (> criterion at the synapse or at the tip)."""
     a = results[prof].summary.query("morphology == 'long'").set_index("site_um")
     b = results["none"].summary.query("morphology == 'long'").set_index("site_um")
     x = np.maximum(a.peak_syn_mV - b.peak_syn_mV, a.peak_tip_mV - b.peak_tip_mV)
@@ -104,6 +113,7 @@ def _events(results, prof, crit=mechanism.EVENT_CRITERION_MV):
 
 
 def _rng(sites):
+    """'a–b µm' (or 'a µm') for a list of sites, 'no site' if empty."""
     if not sites:
         return "no site"
     return f"{min(sites):g} µm" if min(sites) == max(sites) else f"{min(sites):g}–{max(sites):g} µm"
@@ -117,7 +127,23 @@ def _rng(sites):
 
 # --- Methods ------------------------------------------------------------------------------------
 
+def _conductance_table() -> str:
+    """HTML table of the somatic and axonal channel densities of the original model."""
+    names = [("gbar_NaTg", "NaTg (transient Na<sup>+</sup>)"), ("gbar_Nap", "Nap (persistent Na<sup>+</sup>)"),
+             ("gbar_K_P", "K_P (persistent K<sup>+</sup>)"), ("gbar_K_T", "K_T (transient K<sup>+</sup>)"),
+             ("gbar_Kv3_1", "Kv3.1"), ("gbar_Im", "I<sub>M</sub> (muscarinic K<sup>+</sup>)"),
+             ("gbar_SK", "SK (Ca<sup>2+</sup>-activated K<sup>+</sup>)"), ("gbar_Ca_HVA", "Ca_HVA"),
+             ("gbar_Ca_LVA", "Ca<sub>LVA</sub>")]
+    rows = "".join(f"<tr><td>{lab}</td><td>{SOMATIC[k]:.3g}</td><td>{AXONAL[k]:.3g}</td></tr>" for k, lab in names)
+    rows += (f"<tr><td>CaDynamics: γ, τ<sub>Ca</sub> (ms)</td><td>{SOMATIC['gamma_CaDynamics']:g}, "
+             f"{SOMATIC['decay_CaDynamics']:.0f}</td><td>{AXONAL['gamma_CaDynamics']:g}, {AXONAL['decay_CaDynamics']:.0f}"
+             "</td></tr>")
+    return ("<div class='tablewrap'><table><thead><tr><th>Conductance</th><th>Soma (S/cm²)</th><th>Axon (S/cm²)</th>"
+            f"</tr></thead><tbody>{rows}</tbody></table></div>")
+
+
 def methods_html(cells: dict, cfg: Config, rest_mV: float, S: dict, mech_cfg: Config) -> str:
+    """The Methods section: every model ingredient, protocol and analysis, with numbers from the code."""
     meta = load_target_meta()
     s_meta, l_meta = meta["short"], meta["long"]
     g = l_meta["growth"]
@@ -126,6 +152,10 @@ def methods_html(cells: dict, cfg: Config, rest_mV: float, S: dict, mech_cfg: Co
     n_prim = sum(1 for s in short.dend if s.parentseg() is not None and s.parentseg().sec == short.soma[0])
     soma = short.soma[0]
     q10 = 2.3 ** ((cfg.celsius - 21) / 10)
+    t1, t2 = cfg.syn_tau1_ms, cfg.syn_tau2_ms
+    t_peak = t1 * t2 / (t2 - t1) * np.log(t2 / t1)
+    F, N, B = S["factors"], S["noise"], S["bias"]
+    lam = mechanism.length_constant_um(cfg)
     return f"""
 <h3>Neuron model</h3>
 <p>We simulated the human layer 2/3 parvalbumin-positive (PV+) interneuron model (HL23PV) of Yao <i>et al.</i>
@@ -134,20 +164,19 @@ against electrophysiological features of human cortical PV+ interneurons, and wh
 public release {cite('zenodo')}. We translated the original HOC template and biophysics files into Python, using
 the NEURON simulator {cite('neuron97', 'nrnbook')} through its Python interface {cite('nrnpy')}, without changing
 any parameter; an automated test compares every value of the translated model with the original
-<code>biophys_HL23PV.hoc</code>. All compartments have a specific membrane capacitance of {ALL['cm']:g} µF/cm²,
-an axial resistivity of {ALL['Ra']:g} Ω·cm, a leak conductance of {ALL['g_pas']:.3e} S/cm² reversing at
-{ALL['e_pas']:.2f} mV, and a hyperpolarisation-activated cation conductance (I<sub>h</sub>
-{cite('kole2006')}; {ALL['gbar_Ih']:.3e} S/cm²). In the original model the dendrites carry no other conductance,
-whereas the soma and the axon carry transient (NaTg) and persistent (Nap) Na<sup>+</sup> conductances, four
-K<sup>+</sup> conductances (K_P, K_T, Kv3.1, I<sub>M</sub>), a Ca<sup>2+</sup>-activated K<sup>+</sup>
-conductance (SK), high- and low-voltage-activated Ca<sup>2+</sup> conductances (Ca_HVA, Ca<sub>LVA</sub>) and
-intracellular Ca<sup>2+</sup> dynamics, with E<sub>Na</sub> = {SOMATIC['ena']:g} mV and E<sub>K</sub> =
-{SOMATIC['ek']:g} mV; for instance, the somatic densities of NaTg and Ca<sub>LVA</sub> are
-{SOMATIC['gbar_NaTg']:.3f} and {SOMATIC['gbar_Ca_LVA']:.4f} S/cm², respectively. Following the BluePyOpt
-convention used by the original model, we replaced the reconstructed axon with two 30 µm cylindrical sections
-whose diameters ({long.axon[0].diam:.2f} and {long.axon[1].diam:.2f} µm) we took from the reconstruction. We
-set the number of segments of every section to 1 + 2·int(L/40 µm), as in the original code, except along the
-target dendrite (see below), and we ran all simulations at {cfg.celsius:g} °C.</p>
+<code>biophys_HL23PV.hoc</code>. In each compartment the membrane potential V obeys the cable equation</p>
+<p class="eq">c<sub>m</sub> ∂V/∂t = (d / 4R<sub>a</sub>) ∂²V/∂x² − g<sub>pas</sub>(V − E<sub>pas</sub>) − I<sub>h</sub>
+− Σ I<sub>active</sub> − I<sub>syn</sub> − I<sub>inj</sub>,</p>
+<p>where d is the local diameter, with a specific membrane capacitance c<sub>m</sub> = {ALL['cm']:g} µF/cm², an axial
+resistivity R<sub>a</sub> = {ALL['Ra']:g} Ω·cm, a leak conductance g<sub>pas</sub> = {ALL['g_pas']:.3e} S/cm² reversing at
+E<sub>pas</sub> = {ALL['e_pas']:.2f} mV, and a hyperpolarisation-activated cation conductance (I<sub>h</sub>
+{cite('kole2006')}; {ALL['gbar_Ih']:.3e} S/cm²) in all compartments. In the original model the dendrites carry no other
+conductance, whereas the soma and the axon carry the active conductances listed below, with
+E<sub>Na</sub> = {SOMATIC['ena']:g} mV and E<sub>K</sub> = {SOMATIC['ek']:g} mV.</p>
+{_conductance_table()}
+<p>Following the BluePyOpt convention used by the original model, we replaced the reconstructed axon with two 30 µm
+cylindrical sections whose diameters ({long.axon[0].diam:.2f} and {long.axon[1].diam:.2f} µm) we took from the
+reconstruction. All simulations ran at {cfg.celsius:g} °C.</p>
 
 <h3>Morphologies and growth of the target dendrite</h3>
 <p>The reconstruction ({s_meta['file']}, distributed with {cite('zenodo')}) has a soma of {soma.diam:.1f} µm
@@ -161,9 +190,10 @@ its diameter tapers from {geo[0]['diam_max_um']:.2f} µm at the soma to
 <i>long</i> morphology, we extended the tip of this dendrite (SWC node {g['from_swc_id']}) by
 {g['added_um']:.2f} µm, so that the new tip lies {l_meta['tip_distance_um']:.1f} µm from the soma, with the
 random-walk procedure used in our earlier simulations. Starting from the direction of the last original segment
-<b>u</b><sub>0</sub>, we appended points every Δ = {g['step_um']:g} µm along <b>u</b><sub>k+1</sub> =
-(<b>u</b><sub>k</sub> + <b>ξ</b><sub>k</sub>)/‖<b>u</b><sub>k</sub> + <b>ξ</b><sub>k</sub>‖, with
-<b>ξ</b><sub>k</sub> drawn from a three-dimensional Gaussian distribution of zero mean and standard deviation
+<b>u</b><sub>0</sub>, we appended points every Δ = {g['step_um']:g} µm along</p>
+<p class="eq"><b>u</b><sub>k+1</sub> = (<b>u</b><sub>k</sub> + <b>ξ</b><sub>k</sub>) / ‖<b>u</b><sub>k</sub> +
+<b>ξ</b><sub>k</sub>‖, &nbsp;&nbsp; <b>x</b><sub>k+1</sub> = <b>x</b><sub>k</sub> + Δ <b>u</b><sub>k+1</sub>,</p>
+<p>with <b>ξ</b><sub>k</sub> drawn from a three-dimensional Gaussian distribution of zero mean and standard deviation
 {g['jitter_sd']:g} per component (seed {g['seed']}), keeping the radius equal to that of the original tip
 ({g['radius_um']:.4f} µm). The two morphologies are therefore identical except for the
 {g['added_um']:.1f} µm unbranched, constant-diameter ({2 * g['radius_um']:.2f} µm) extension, which adds
@@ -171,17 +201,39 @@ random-walk procedure used in our earlier simulations. Starting from the directi
 (Supplementary Fig. S1). As a control, the code can also remove the side branches of the target dendrite in
 both morphologies; all results shown here keep them.</p>
 <p>To test the role of the proximal diameter, we also simulated both morphologies with a wider "mouth" of the
-target dendrite: we multiplied the diameter of each reconstruction point at distance d by
-1 + (s − 1)·max(1 − d/ℓ, 0), with s = {max(S['factors']['mouth_scale']):g} and ℓ = {cfg.mouth_length_um:g} µm, the
-distance of the second branch point, so that the diameter at the soma grows from {geo[0]['diam_max_um']:.2f} to
-{max(S['factors']['mouth_scale']) * geo[0]['diam_max_um']:.2f} µm while the taper and the rest of the dendrite are
+target dendrite, multiplying the diameter of each reconstruction point at distance d by</p>
+<p class="eq">1 + (s − 1)·max(1 − d/ℓ, 0), &nbsp;&nbsp; s = {max(F['mouth_scale']):g}, ℓ = {cfg.mouth_length_um:g} µm,</p>
+<p>ℓ being the distance of the second branch point; the diameter at the soma grows from {geo[0]['diam_max_um']:.2f} to
+{max(F['mouth_scale']) * geo[0]['diam_max_um']:.2f} µm, while the taper beyond ℓ and the rest of the cell are
 unchanged.</p>
 
-<h3>Spatial discretisation</h3>
-<p>To resolve synaptic sites spaced by 10 µm and the spatial profiles of channel density, we divided every
-section of the target dendrite into an odd number of segments no longer than {cfg.max_seg_len_um:g} µm
-({sum(s.nseg for s in short.target_path)} segments in the short and {sum(s.nseg for s in long.target_path)} in
-the long morphology), in both morphologies alike.</p>
+<h3>Discretisation, integration and initialisation</h3>
+<p>We set the number of segments of every section to 1 + 2·int(L/40 µm), as in the original code, except along the
+target dendrite, where we used an odd number of segments no longer than {cfg.max_seg_len_um:g} µm
+({sum(s.nseg for s in short.target_path)} segments in the short and {sum(s.nseg for s in long.target_path)} in the long
+morphology) to resolve synaptic sites 10 µm apart and the spatial profiles of channel density. We integrated the
+equations with NEURON's fixed-step backward Euler method (Δt = {cfg.dt_ms * 1e3:g} µs). Before each simulation we
+initialised the membrane potential at {cfg.v_init_mV:g} mV and brought the cell to its steady state by a few implicit
+integration steps of very large size (10<sup>9</sup> ms) at negative times, so that every simulation started from rest
+({rest_mV:.1f} mV without bias) with flat baselines (fluctuations below 10<sup>−10</sup> mV); any steady somatic current
+was applied during this initialisation as well.</p>
+
+<h3>Synaptic input</h3>
+<p>We modelled an excitatory synapse as a conductance with a double-exponential time course (NEURON
+<code>Exp2Syn</code>),</p>
+<p class="eq">g<sub>syn</sub>(t) = w·f·[exp(−t/τ<sub>2</sub>) − exp(−t/τ<sub>1</sub>)], &nbsp;&nbsp;
+I<sub>syn</sub> = g<sub>syn</sub>(t)·(V − E<sub>syn</sub>),</p>
+<p>where f = 1/[exp(−t<sub>p</sub>/τ<sub>2</sub>) − exp(−t<sub>p</sub>/τ<sub>1</sub>)], with
+t<sub>p</sub> = τ<sub>1</sub>τ<sub>2</sub> ln(τ<sub>2</sub>/τ<sub>1</sub>)/(τ<sub>2</sub> − τ<sub>1</sub>) = {t_peak:.2f} ms,
+normalises the peak conductance to w. We used τ<sub>1</sub> = {t1:g} ms, τ<sub>2</sub> = {t2:g} ms,
+E<sub>syn</sub> = {cfg.syn_e_mV:g} mV and w = {cfg.syn_weight_uS * 1e3:g} nS throughout (a weight that corresponds to
+the coincident activation of about 15 contacts of the pyramidal-to-PV connections of the original network model,
+0.34 nS each {cite('yao2022')}). We activated the synapse either once, {cfg.onset_ms:g} ms after the start of the
+simulation, or with a regular train of {S['train']['overrides'].get('n_events', 5)} events at
+{S['train']['overrides'].get('freq_hz', 50):g} Hz. In each simulation we placed a single synapse on the target dendrite,
+at path distances from {cfg.site_start_um:g} µm to the tip in steps of {cfg.site_step_um:g} µm, the same in both
+morphologies (that is, 10–100 µm in the short and 10–400 µm in the long morphology); each synapse sits at the centre
+of the segment containing that distance, within {cfg.max_seg_len_um / 2:g} µm of it.</p>
 
 <h3>Dendritic Ca<sub>LVA</sub> conductance</h3>
 <p>Since the original model has passive dendrites, we added a low-voltage-activated Ca<sup>2+</sup> conductance
@@ -191,105 +243,115 @@ from Hay <i>et al.</i> {cite('hay2011')} and is based on the data of Avery and J
 Randall and Tsien {cite('randall1997')}. The current is I<sub>Ca</sub> = ḡ m² h (V − E<sub>Ca</sub>), and
 both gates obey first-order kinetics, dx/dt = (x<sub>∞</sub> − x)/τ<sub>x</sub>, with (V in mV, shifted by
 +10 mV to account for the liquid junction potential, V′ = V + 10)</p>
-<p class="eq">m<sub>∞</sub> = 1 / (1 + exp(−(V′ + 30)/6)),&nbsp;&nbsp;
-τ<sub>m</sub> = [5 + 20 / (1 + exp((V′ + 25)/5))] / q ms,<br>
+<p class="eq">m<sub>∞</sub> = 1 / (1 + exp(−(V′ − ΔV + 30)/6)),&nbsp;&nbsp;
+τ<sub>m</sub> = [5 + 20 / (1 + exp((V′ − ΔV + 25)/5))] / q ms,<br>
 h<sub>∞</sub> = 1 / (1 + exp((V′ + 80)/6.4)),&nbsp;&nbsp;
 τ<sub>h</sub> = [20 + 50 / (1 + exp((V′ + 40)/7))] / q ms,</p>
-<p>where q = 2.3<sup>(T − 21 °C)/10</sup> = {q10:.2f} at {cfg.celsius:g} °C. Wherever we inserted
-Ca<sub>LVA</sub>, we also inserted the intracellular Ca<sup>2+</sup> dynamics of the original model
-{cite('destexhe1994', 'hay2011')}, a submembrane shell of depth d = 0.1 µm in which
-d[Ca<sup>2+</sup>]<sub>i</sub>/dt = −10<sup>4</sup> γ I<sub>Ca</sub> / (2 F d) − ([Ca<sup>2+</sup>]<sub>i</sub> −
-[Ca<sup>2+</sup>]<sub>min</sub>)/τ<sub>Ca</sub>, with γ = {cfg.cadyn_gamma:g}, τ<sub>Ca</sub> =
-{cfg.cadyn_decay_ms:.0f} ms (the somatic values) and [Ca<sup>2+</sup>]<sub>min</sub> = 100 nM. E<sub>Ca</sub>
-followed the Nernst equation with [Ca<sup>2+</sup>]<sub>o</sub> = 2 mM (about 131 mV at rest).</p>
-<p>To test whether channels that activate at more negative potentials change the results, we also used a
-copy of this channel for the dendrite (<code>Ca_LVA_dend.mod</code>) in which only the activation gate is shifted:
-m<sub>∞</sub> and τ<sub>m</sub> are evaluated at V − ΔV, with ΔV = −15 mV, which moves the half-activation of
-m from −40 to −55 mV and leaves inactivation unchanged; with ΔV = 0 the copy reproduces the original channel
-exactly. The soma and the axon always kept the original channel.</p>
-<p>We defined the dendritic channel density ḡ(d) as a function of the path distance d of each segment from the
-soma, over the whole target dendrite (0–{l_meta['tip_distance_um']:.0f} µm), for two profiles: <i>uniform</i>
-(ḡ = g) and <i>increasing</i> (ḡ = 2g·min(d/L, 1), with L = {cfg.gradient_span_um:g} µm), which is zero at the
-soma, equals g at the midpoint ({cfg.gradient_span_um / 2:g} µm) and 2g at the tip, so that over the nearly
-cylindrical dendrite both profiles carry about the same total conductance. We used g =
-{' and '.join(f'{g:g}' for g in S['factors']['g_ca_mS_cm2'])} mS/cm². We note that these dendritic densities are
-model assumptions, not measurements.</p>
+<p>where q = 2.3<sup>(T − 21 °C)/10</sup> = {q10:.2f} at {cfg.celsius:g} °C. ΔV = 0 gives the original channel. To test
+whether channels that activate at more negative potentials change the results, we used for the dendrite a copy of the
+channel (<code>Ca_LVA_dend.mod</code>) in which only the activation gate is shifted by ΔV =
+{min(F['ca_act_shift_mV']):g} mV, which moves the half-activation of m from −40 to −55 mV and leaves inactivation
+unchanged; with ΔV = 0 the copy reproduces the original channel exactly (tested). The soma and the axon always kept the
+original channel. Wherever we inserted Ca<sub>LVA</sub>, we also inserted the intracellular Ca<sup>2+</sup> dynamics of
+the original model {cite('destexhe1994', 'hay2011')}, a submembrane shell of depth δ = 0.1 µm in which</p>
+<p class="eq">d[Ca<sup>2+</sup>]<sub>i</sub>/dt = −10<sup>4</sup> γ I<sub>Ca</sub> / (2 F δ) −
+([Ca<sup>2+</sup>]<sub>i</sub> − [Ca<sup>2+</sup>]<sub>min</sub>)/τ<sub>Ca</sub>,</p>
+<p>with γ = {cfg.cadyn_gamma:g}, τ<sub>Ca</sub> = {cfg.cadyn_decay_ms:.0f} ms (the somatic values),
+[Ca<sup>2+</sup>]<sub>min</sub> = 100 nM and F the Faraday constant. E<sub>Ca</sub> followed the Nernst equation with
+[Ca<sup>2+</sup>]<sub>o</sub> = 2 mM (about 131 mV at rest).</p>
+<p>We defined the dendritic channel density ḡ(d) as a function of the path distance d of each segment from the soma,
+over the whole target dendrite (0–{l_meta['tip_distance_um']:.0f} µm), for two profiles:</p>
+<p class="eq"><i>uniform</i>: ḡ(d) = g; &nbsp;&nbsp; <i>increasing</i>: ḡ(d) = 2g·min(d/L, 1), &nbsp; L =
+{cfg.gradient_span_um:g} µm.</p>
+<p>The increasing profile is zero at the soma, equals g at the midpoint ({cfg.gradient_span_um / 2:g} µm) and 2g at the
+tip; since the dendrite is nearly cylindrical, both profiles carry about the same total conductance
+G = Σ<sub>i</sub> ḡ(d<sub>i</sub>) A<sub>i</sub> over the segments i of membrane area A<sub>i</sub> (within 2%). We used
+g = {' and '.join(f'{x:g}' for x in F['g_ca_mS_cm2'])} mS/cm², combined in a full factorial design with the two
+activation ranges, the two profiles and the two mouth diameters. We note that these dendritic densities are model
+assumptions, not measurements.</p>
 
 <h3>Somatic current injection</h3>
-<p>To let the cell fire, we injected current at the soma in two ways, always relative to the rheobase of each cell
-and condition, which we defined as the smallest {RHEOBASE_STEP_MS:g} ms current step that evokes a spike and determined by
-bisection (to 2 pA). First, a steady current of {', '.join(f'{100 * f:.0f}' for f in S['bias']['fractions'] if f)}%
-of rheobase, applied throughout the simulation including the initialisation, so that each run started from the new
-steady state. Second, a fluctuating current with mean {100 * S['noise']['mu_frac']:.0f}% of rheobase and an
-Ornstein–Uhlenbeck component of standard deviation {100 * S['noise']['sigma_frac']:.0f}% of rheobase and
-correlation time {S['noise']['tau_ms']:g} ms, which made the cell fire irregularly at a few Hz. For efficiency, each
-simulation (block) delivered {S['noise']['inputs_per_block']} synaptic inputs, one every {S['noise']['period_ms']:g} ms after
-a {S['noise']['warmup_ms']:g} ms warm-up, and we ran {S['noise']['n_blocks']} blocks with different noise per synapse
-position ({S['noise']['n_blocks'] * S['noise']['inputs_per_block']} inputs), in parallel on separate processor cores.
-For each block, we simulated the same noise without the synapse, so that the difference between the two spike trains
-isolates the spikes added by the synapse. From the spike times we computed peri-stimulus time histograms (PSTHs,
-{S['noise']['psth_bin_ms']:g} ms bins) and the number of extra spikes per input in the {S['noise']['count_window_ms'][0]:g}–{S['noise']['count_window_ms'][1]:g}
-ms after it, with 95% confidence intervals from 1000 bootstrap resamples of the inputs.</p>
-
-<h3>Synaptic input</h3>
-<p>We modelled an excitatory synapse as a conductance with a double-exponential time course (NEURON
-<code>Exp2Syn</code>), g<sub>syn</sub>(t) = w·f·[exp(−t/τ<sub>2</sub>) − exp(−t/τ<sub>1</sub>)], normalised
-(through f) to a peak of w, with τ<sub>1</sub> = {cfg.syn_tau1_ms:g} ms, τ<sub>2</sub> = {cfg.syn_tau2_ms:g} ms,
-reversal potential {cfg.syn_e_mV:g} mV and w = {cfg.syn_weight_uS * 1e3:g} nS, unless stated otherwise. We
-activated it either once, {cfg.onset_ms:g} ms after the start of the simulation, or with a regular train of
-5 events at 50 Hz. In each simulation we placed a single synapse on the target dendrite, at path distances from
-{cfg.site_start_um:g} µm to the tip in steps of {cfg.site_step_um:g} µm, the same in both morphologies (that is,
-10–100 µm in the short and 10–400 µm in the long morphology); each synapse sits at the centre of the
-segment containing that distance, within {cfg.max_seg_len_um / 2:g} µm of it.</p>
-
-<h3>Simulations</h3>
-<p>We integrated the equations with NEURON's fixed-step backward Euler method (Δt = {cfg.dt_ms * 1e3:g} µs).
-Before each simulation, we initialised the membrane potential at {cfg.v_init_mV:g} mV and brought the cell to
-its steady state by a few implicit integration steps of very large size at negative times, so that every
-simulation started from rest ({rest_mV:.1f} mV) with flat
-baselines (fluctuations below 10<sup>−10</sup> mV). We then simulated {cfg.t_post_ms:g} ms beyond the last
-synaptic event.</p>
+<p>To let the cell fire, we injected current at the soma, always relative to the rheobase I<sub>rh</sub> of each cell and
+channel configuration, defined as the smallest {RHEOBASE_STEP_MS:g} ms current step that evokes a spike and determined by
+bisection (to 2 pA). First, a steady current of {', '.join(f'{100 * f:.0f}' for f in B['fractions'] if f)}% of
+I<sub>rh</sub>, applied throughout the simulation including the initialisation, with dendritic Ca<sub>LVA</sub> at
+{', '.join(f'{x:g}' for x in B['g_ca_mS_cm2'])} mS/cm². Second, a fluctuating current
+I<sub>inj</sub>(t) = μ + η(t), with μ = {N['mu_frac']:g}·I<sub>rh</sub> and η an Ornstein–Uhlenbeck process of standard
+deviation σ = {N['sigma_frac']:g}·I<sub>rh</sub> and correlation time τ = {N['tau_ms']:g} ms,</p>
+<p class="eq">dη = −(η/τ) dt + σ (2/τ)<sup>1/2</sup> dW, &nbsp;&nbsp; computed exactly on the integration grid as
+η<sub>n+1</sub> = a η<sub>n</sub> + σ (1 − a²)<sup>1/2</sup> ζ<sub>n</sub>, &nbsp; a = exp(−Δt/τ),</p>
+<p>with ζ<sub>n</sub> independent standard Gaussian numbers, so that the cell fired irregularly at a few Hz. Each simulation
+(block) delivered {N['inputs_per_block']} synaptic inputs, one every {N['period_ms']:g} ms after a {N['warmup_ms']:g} ms
+warm-up, and we ran {N['n_blocks']} blocks with different noise (seeds 1000 to {1000 + N['n_blocks'] - 1}) per condition and
+synapse position, that is {N['n_blocks'] * N['inputs_per_block']} inputs at each of
+{', '.join(f'{x:g}' for x in N['sites_um'])} µm, with dendritic Ca<sub>LVA</sub> at {N['g_ca_mS_cm2']:g} mS/cm². For each
+block we also simulated the same noise without the synapse. Blocks ran in parallel on separate processor cores.</p>
 
 <h3>Measurements</h3>
 <p>We recorded the membrane potential at the soma, at the synapse and at the tip of the target dendrite, and
-[Ca<sup>2+</sup>]<sub>i</sub> and I<sub>Ca</sub> at the synapse. We defined the somatic (local) EPSP amplitude as
-the peak depolarisation after the input relative to the mean potential in the 5 ms before it, the attenuation
-as the ratio between somatic and local amplitudes, the EPSP area as the time integral of the somatic
-depolarisation, the 10–90% rise time and the half-width of single-event somatic EPSPs, and the local
-Δ[Ca<sup>2+</sup>]<sub>i</sub> as the peak increase of [Ca<sup>2+</sup>]<sub>i</sub>. We counted a dendritic
-<i>Ca<sub>LVA</sub> event</i> whenever Ca<sub>LVA</sub> added more than {mechanism.EVENT_CRITERION_MV:g} mV to the
-peak depolarisation at the synapse or at the tip of the dendrite, compared with the same synapse in the same
-morphology without dendritic Ca<sub>LVA</sub> (the tip is included because events triggered by proximal synapses
-start in the distal dendrite), and we
-defined the onset distance as the most proximal site with an event. To describe the time course of the EPSP,
-both at the soma and at the synapse, we computed its integral above rest, an effective time constant equal to the
-integral divided by the peak, and a decay time constant from a log-linear fit of the falling phase between 80% and
-20% of the peak.</p>
+[Ca<sup>2+</sup>]<sub>i</sub> and I<sub>Ca</sub> at the synapse. For each recording we defined ΔV(t) = V(t) − V<sub>0</sub>,
+V<sub>0</sub> being the mean potential in the 5 ms before the input, and the EPSP amplitude as the peak of ΔV after the input
+(for trains, the largest peak during the train). The attenuation is the ratio between the somatic and local amplitudes. To
+describe the time course of the EPSP, at the soma and at the synapse, we computed its integral
+A = ∫ max(ΔV, 0) dt, the effective time constant τ<sub>eff</sub> = A/ΔV<sub>peak</sub>, and the decay time constant
+τ<sub>decay</sub> from a least-squares fit of ln ΔV(t) = c − t/τ<sub>decay</sub> over the falling phase between 80% and
+20% of the peak. For single events we also measured the somatic 10–90% rise time, half-width and latency to peak, and the
+peak local Δ[Ca<sup>2+</sup>]<sub>i</sub>. We counted a dendritic <i>Ca<sub>LVA</sub> event</i> whenever Ca<sub>LVA</sub>
+added more than {mechanism.EVENT_CRITERION_MV:g} mV to the peak ΔV at the synapse or at the tip of the dendrite, compared
+with the same synapse in the same morphology without dendritic Ca<sub>LVA</sub>; the tip is included because events
+triggered by synapses near the soma start in the distal dendrite. The onset distance is the most proximal site with an
+event. A somatic spike is an upward crossing of 0 mV.</p>
+
+<h3>Electrotonic analysis</h3>
+<p>We computed, along the target dendrite and without dendritic Ca<sub>LVA</sub>, the local input impedance
+Z<sub>in</sub>(x, f) = Ṽ(x)/Ĩ(x) and the transfer impedance to the soma Z<sub>tr</sub>(x, f) = Ṽ<sub>soma</sub>/Ĩ(x),
+where Ĩ(x) is a sinusoidal current of frequency f injected at x and Ṽ the resulting voltage amplitudes, at f = 0 and
+100 Hz, with NEURON's <code>Impedance</code> class linearising the active conductances around rest (extended mode). The
+steady-state voltage attenuation from x to the soma is |Z<sub>tr</sub>(x, 0)|/|Z<sub>in</sub>(x, 0)|. We estimated the
+leak length constant of the grown dendrite as λ = (R<sub>m</sub> d / 4 R<sub>a</sub>)<sup>1/2</sup> {cite('rall1959')},
+with R<sub>m</sub> = 1/g<sub>pas</sub>, which gives λ = {lam:.0f} µm, so that the 400 µm dendrite is
+{400 / lam:.1f} length constants long.</p>
 
 <h3>Mechanistic analyses</h3>
-<p>We computed the local input impedance along the target dendrite, and the transfer impedance to the soma, at
-0 and 100 Hz with NEURON's <code>Impedance</code> class, linearising the active conductances around rest
-(extended mode), in both morphologies without dendritic Ca<sub>LVA</sub>. We estimated the leak length constant
-of the grown dendrite as λ = (R<sub>m</sub> d / 4 R<sub>a</sub>)<sup>1/2</sup> {cite('rall1959')}, with
-R<sub>m</sub> = 1/g<sub>pas</sub>. We characterised the passive local EPSP by its peak and by the time it spends
-above −50 mV. For these analyses we used {mech_cfg.ca_profile} Ca<sub>LVA</sub> at {mech_cfg.g_ca_mS_cm2:g}
-mS/cm² with {'the original activation' if mech_cfg.ca_act_shift_mV == 0 else f'activation shifted by {mech_cfg.ca_act_shift_mV:g} mV'},
-the condition with the most robust events. To find the smallest synaptic weight that triggers an event, we scanned w over
-{', '.join(f'{x:g}' for x in mechanism.SCAN_WEIGHTS)} nS at {', '.join(f'{x:g}' for x in mechanism.SCAN_SITES)}
-µm; to test the role of the EPSP duration, we varied τ<sub>2</sub> over
-{', '.join(f'{x:g}' for x in mechanism.TAU2_VALUES)} ms at fixed w, at sites every 20 µm. For the gating
-analysis, we recorded m and h of Ca<sub>LVA</sub> at a synapse {mechanism.EXAMPLE_SITE:g} µm from the soma.</p>
+<p>For these analyses we used {mech_cfg.ca_profile} Ca<sub>LVA</sub> at {mech_cfg.g_ca_mS_cm2:g} mS/cm² with
+{'the original activation' if mech_cfg.ca_act_shift_mV == 0 else f'activation shifted by {mech_cfg.ca_act_shift_mV:g} mV'},
+the condition with the most robust events. We characterised the passive local EPSP by its peak and by the time it spends
+above −50 mV. To find the smallest synaptic weight that triggers an event, we scanned w over
+{', '.join(f'{x:g}' for x in mechanism.SCAN_WEIGHTS)} nS at {', '.join(f'{x:g}' for x in mechanism.SCAN_SITES)} µm;
+to test the role of the EPSP duration, we varied τ<sub>2</sub> over {', '.join(f'{x:g}' for x in mechanism.TAU2_VALUES)} ms
+at fixed w, at sites every 20 µm. For the gating analysis, we recorded m and h of Ca<sub>LVA</sub> at a synapse
+{mechanism.EXAMPLE_SITE:g} µm from the soma.</p>
+
+<h3>Analysis of the noisy-current experiments</h3>
+<p>For each input j we collected the spike times t<sub>k</sub> relative to the input, with and without the synapse (same
+noise). The peri-stimulus time histograms (PSTHs) are the spike counts in {N['psth_bin_ms']:g} ms bins (5 ms in the
+figures) divided by the number of inputs and the bin width. The cumulative number of extra spikes per input is</p>
+<p class="eq">C(t) = (1/N) Σ<sub>j</sub> [ #{{t<sub>k</sub><sup>syn</sup> ≤ t}}<sub>j</sub> −
+#{{t<sub>k</sub><sup>no syn</sup> ≤ t}}<sub>j</sub> ],</p>
+<p>and the number of extra spikes per input is C({N['count_window_ms'][1]:g} ms); we also split it into the first 20 ms and
+the remaining 20–{N['count_window_ms'][1]:g} ms. Confidence intervals (95%) are percentiles of 1000 bootstrap resamples of the
+N inputs (paired differences). For the example traces, we searched all inputs at {N['example_site_um']:g} µm for those in
+which, with the same noise seed, neither the noise alone nor the synapse without dendritic Ca<sub>LVA</sub> produced a spike
+within 60 ms, whereas the synapse with dendritic Ca<sub>LVA</sub> did (first spike 5–50 ms after the input); we show the first
+such input with a spike latency of 15–35 ms and report how many inputs met the criterion. Because the noise is scaled to each
+cell's rheobase, the noise seed, but not its exact amplitude, is shared between cells.</p>
+
+<h3>Reproducibility</h3>
+<p>All simulations without noise are deterministic. The noise seeds are fixed (1000 + block index), the random walk of the
+growth uses seed {g['seed']}, and the bootstrap uses seed 0, so that every number and figure is reproduced exactly by
+re-running the code. All parameters of every study are listed in <code>configs/studies.json</code>; results are cached
+together with the parameters that produced them, and reused only when these are identical.</p>
 
 <h3>Software, code and data availability</h3>
 <p>All code, morphologies, configuration files and figures are available at
 <a href="{REPO_URL}">{REPO_URL}</a> under a BSD 3-Clause licence (the files of the original model keep the terms
 of their release {cite('zenodo')}). The repository contains the Python package that implements the model and the
 protocols, the scripts that regenerate every figure and this report from the configuration files
-(<code>scripts/make_all_figures.py</code>, <code>scripts/make_report.py</code>), automated tests, and an
-interactive notebook that runs in the browser on Google Colab (<a href="{COLAB_URL}">link</a>). We used
-Python {platform.python_version()}, NEURON {neuron.__version__}, NumPy {np.__version__} {cite('numpy')},
-pandas {pandas.__version__} {cite('pandas')}, Matplotlib {matplotlib.__version__} {cite('matplotlib')} and
-Plotly {plotly.__version__}.</p>"""
+(<code>scripts/make_all_figures.py</code>, <code>scripts/make_report.py</code>), automated tests, and two notebooks that run
+in the browser on Google Colab: an interactive explorer (<a href="{COLAB_URL}">link</a>) and a step-by-step notebook that
+regenerates every figure with explanations (<a href="{COLAB_FIG_URL}">link</a>). We used Python {platform.python_version()},
+NEURON {neuron.__version__}, NumPy {np.__version__} {cite('numpy')}, pandas {pandas.__version__} {cite('pandas')},
+Matplotlib {matplotlib.__version__} {cite('matplotlib')} and Plotly {plotly.__version__}.</p>"""
 
 
 # --- Results ------------------------------------------------------------------------------------
@@ -298,19 +360,23 @@ KIN = {0.0: "original", -15.0: "shifted"}
 
 
 def _cond(shift, g):
+    """Readable name of a density / activation condition."""
     return f"{g:g} mS/cm² with {'the original' if shift == 0 else 'shifted'} activation"
 
 
 def _events_txt(res, prof):
+    """'events for synapses at a–b µm' or 'no event at any site'."""
     ev = _events(res, prof)
     return f"events for synapses at {_rng(ev)}" if ev else "no event at any site"
 
 
 def _boost(res, prof, site):
+    """Ratio of the somatic EPSP with dendritic Ca_LVA to that without, for the synapse at `site`."""
     return _v(res[prof], "long", site, "peak_soma_mV") / _v(res["none"], "long", site, "peak_soma_mV")
 
 
 def _fmt0(d):
+    """Format a distance without decimals, with an en dash for NaN."""
     return "–" if d != d else f"{d:.0f}"
 
 
@@ -332,6 +398,7 @@ def _distal_initiation(res) -> str:
 
 
 def _threshold_txt(fail, ok) -> str:
+    """Sentence fragment on the synaptic weight needed to trigger an event at each distance."""
     parts = []
     if len(fail):
         parts.append(f"no synapse at {', '.join(f'{d:g}' for d in fail)} µm triggered an event even at "
@@ -344,12 +411,14 @@ def _threshold_txt(fail, ok) -> str:
 
 
 def _rest_firing(single, train) -> str:
+    """Sentence stating whether any single synapse or train made the resting cell fire."""
     n = sum(int(r.summary.n_spikes_soma.sum()) for grid in (single, train) for res in grid.values() for r in res.values())
     return ("No single synapse or train made the resting cell fire." if n == 0
             else f"At rest, single synapses or trains evoked {n} somatic spikes in total.")
 
 
 def results_html(single, train, bias, noise_ev, D, cells, cfg, S, noise_split=None) -> str:
+    """The Results section: one subsection per claim, every number computed from the results."""
     n = single[(0.0, 1.0, 1.0)]["none"]
     short, long = cells["short"], cells["long"]
     zl, zs = D["impedance"]["long"], D["impedance"]["short"]
@@ -366,7 +435,7 @@ we grew the same dendrite to {long.tip_distance:.0f} µm (Fig. 1). Along the gro
 impedance rose from {z(zl, 10):.0f} MΩ at 10 µm to {z(zl, 400):.0f} MΩ at the tip, against
 {zl.zin_soma_0Hz_MOhm.iloc[0]:.1f} MΩ at the soma (Fig. 2a), so that a {cfg.syn_weight_uS * 1e3:g} nS synapse
 depolarised its own membrane more, and for longer, the farther it was from the soma: the effective time constant
-of the local EPSP grew from {ns.tau_eff_ms_syn[50]:.1f} ms at 50 µm to {ns.tau_eff_ms_syn[400]:.1f} ms at the tip
+of the local EPSP grew from {float(ns.tau_eff_ms_syn.iloc[int(np.argmin(np.abs(ns.index - 50)))]):.1f} ms at 50 µm to {float(ns.tau_eff_ms_syn.iloc[int(np.argmin(np.abs(ns.index - 400)))]):.1f} ms at the tip
 (Fig. 2e). At the soma, however, the same synapse produced {_v(n, 'long', 10, 'peak_soma_mV'):.2f} mV at 10 µm and
 only {_v(n, 'long', 400, 'peak_soma_mV'):.2f} mV at 400 µm (Fig. 3a). Already at 100 µm the somatic EPSP was smaller
 in the long ({_v(n, 'long', 100, 'peak_soma_mV'):.2f} mV) than in the short morphology
@@ -487,6 +556,7 @@ activation range systematically.</p>"""
 # --- Figure legends ------------------------------------------------------------------------------
 
 def legends_html(single, D, cells, cfg, S) -> str:
+    """Figure legends for the proposed main and supplementary figures."""
     short, long = cells["short"], cells["long"]
     F = S["factors"]
     syn = (f"Exp2Syn, τ<sub>1</sub> = {cfg.syn_tau1_ms:g} ms, τ<sub>2</sub> = {cfg.syn_tau2_ms:g} ms, "
@@ -559,6 +629,7 @@ def _minus(text: str) -> str:
 
 
 def html(single, train, bias, noise_ev, D, cells, cfg, S, noise_split=None) -> str:
+    """The whole 'Draft manuscript material' block: Methods, Results, legends and references."""
     return _minus(f"""
 <h2 id="manuscript">Draft manuscript material</h2>
 <p class="meta">Draft text for a manuscript, written from the simulations in this report; every number is filled in

@@ -25,24 +25,29 @@ _STYLE = {"description_width": "150px"}
 
 
 def _download(path):
+    """On Colab, offer the file at `path` as a browser download (no-op elsewhere)."""
     if IN_COLAB:
         from google.colab import files
         files.download(str(path))
 
 
 class Explorer:
+    """Widget panel of the explorer notebook: tabs of parameters, action buttons, progress and output."""
     def __init__(self, cfg: Config | None = None):
+        """Create one widget per Config field (initialised from `cfg`), the buttons and the layout."""
         cfg = cfg or Config(name="explorer", site_step_um=20)
         self.fig = None
         self.fig_stem = None
         self.last_config = None
 
         def fl(value, desc, lo, hi, step, fmt=".3g"):
+            """A float slider with a fixed layout."""
             return W.FloatSlider(value=value, min=lo, max=hi, step=step, description=desc,
                                  readout_format=fmt, continuous_update=False,
                                  layout=_WIDE, style=_STYLE)
 
         def num(value, desc, step):
+            """A bounded float text box with a fixed layout."""
             return W.BoundedFloatText(value=value, min=0, max=1, step=step, description=desc,
                                       layout=_WIDE, style=_STYLE)
 
@@ -111,12 +116,14 @@ class Explorer:
 
     # --- widgets -> Config -----------------------------------------------------------
     def _refresh(self):
+        """Enable only the widgets that matter for the selected Ca_LVA profile."""
         w, prof = self.w, self.w["ca_profile"].value
         for k in ("g_ca_mS_cm2", "ca_act_shift_mV"):
             w[k].disabled = prof == "none"
         w["gradient_span_um"].disabled = prof != "increasing"
 
     def config(self, **overrides) -> Config:
+        """Read the widgets into a Config (any keyword overrides a field)."""
         w = self.w
         fields = {k: w[k].value for k in asdict(Config()) if k in w}
         fields["syn_weight_uS"] = w["syn_weight_nS"].value / 1e3
@@ -127,6 +134,7 @@ class Explorer:
 
     # --- actions -----------------------------------------------------------------------
     def _guard(self, fn):
+        """Run a button action with all buttons disabled, and show any error in the status line."""
         for btn in self.b.values():
             btn.disabled = True
         try:
@@ -139,10 +147,12 @@ class Explorer:
                 btn.disabled = False
 
     def _progress(self, i, n, text):
+        """Update the progress bar and the status text during a sweep."""
         self.progress.max, self.progress.value = n, i
         self.status.value = f"&nbsp;{i}/{n} &nbsp; {text}"
 
     def _show(self, fig, stem, cfg):
+        """Display a figure in the output area and remember it for 'Export figure'."""
         self.fig, self.fig_stem, self.last_config = fig, stem, cfg
         with self.out:
             self.out.clear_output(wait=True)
@@ -150,6 +160,7 @@ class Explorer:
         plt.close(fig)
 
     def run_sweep(self):
+        """Button 'Run sweep': all sites of the current Config, then the overview figure."""
         cfg = self.config()
         t0 = time.time()
         res = run_sweep(cfg, progress=self._progress)
@@ -159,6 +170,7 @@ class Explorer:
         self.status.value = f"&nbsp;done in {time.time() - t0:.0f} s ({len(res.summary)} simulations)"
 
     def run_comparison(self):
+        """Button 'Compare all profiles': one sweep per Ca_LVA profile, then the comparison figure."""
         base = self.config()
         results = {}
         n = len(CA_PROFILES)
@@ -171,6 +183,7 @@ class Explorer:
         self.status.value = "&nbsp;done"
 
     def run_site(self):
+        """Button 'Run single site': one synapse position in detail (traces at the soma, synapse and Ca²⁺)."""
         cfg = self.config(sites_um=[self.w["site_um"].value])
         res = run_sweep(cfg, progress=self._progress)
         if res.summary.empty:
@@ -182,6 +195,7 @@ class Explorer:
             display(res.summary[cols].round(3))
 
     def export(self):
+        """Button 'Export figure': save the last figure (PDF/SVG/PNG) and its Config in figures/."""
         if self.fig is None:
             raise ValueError("Run something first.")
         paths = plotting.save_figure(self.fig, self.fig_stem)
@@ -192,6 +206,7 @@ class Explorer:
                 _download(p)
 
     def save_config(self):
+        """Button 'Save config': write the current Config to configs/<name>.json (reproducible with scripts/run.py)."""
         cfg = self.config()
         path = CONFIG_DIR / f"{cfg.name}.json"
         cfg.to_json(path)
@@ -201,6 +216,7 @@ class Explorer:
 
 
 def explorer(cfg: Config | None = None) -> Explorer:
+    """Create the Explorer, display it in the notebook and return it (to inspect results afterwards)."""
     ex = Explorer(cfg)
     display(ex.ui)
     return ex

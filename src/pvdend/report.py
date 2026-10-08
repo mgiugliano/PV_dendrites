@@ -63,6 +63,7 @@ AI_STATEMENT = (
 # --- helpers ---------------------------------------------------------------------------------------
 
 def _svg(fig, save_as=None) -> str:
+    """Render a figure as an inline SVG <img> (optionally also saving it as PDF/PNG under figures/)."""
     if save_as:
         plotting.save_figure(fig, save_as, formats=("pdf", "png"))
     buf = io.StringIO()
@@ -73,16 +74,28 @@ def _svg(fig, save_as=None) -> str:
 
 
 def _figure(fig, caption, save_as=None) -> str:
+    """A <figure> with the rendered figure and its caption."""
     return f"<figure>{_svg(fig, save_as)}<figcaption>{caption}</figcaption></figure>"
 
 
 def _value(res, morph, site, col):
-    df = res.summary
-    row = df[(df.morphology == morph) & (np.isclose(df.site_um, site))]
-    return float(row[col].iloc[0]) if len(row) else np.nan
+    """Value of column `col` for the synapse at `site` (µm) in morphology `morph` (nearest simulated site,
+    within half a site step; NaN if none)."""
+    df = res.summary[res.summary.morphology == morph]
+    if df.empty:
+        return np.nan
+    i = int(np.argmin(np.abs(df.site_um.to_numpy() - site)))
+    return float(df[col].iloc[i]) if abs(df.site_um.iloc[i] - site) <= res.config.site_step_um / 2 + 1e-6 else np.nan
+
+
+def _at(series, site):
+    """Value of a site-indexed Series at the simulated site nearest to `site` (µm)."""
+    idx = series.index.to_numpy(dtype=float)
+    return float(series.iloc[int(np.argmin(np.abs(idx - site)))])
 
 
 def _fmt(x, digits=2):
+    """Format a number for a table, with an en dash for missing values."""
     return "–" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.{digits}f}"
 
 
@@ -102,6 +115,7 @@ def event_sites(results: dict, prof: str, criterion=mechanism.EVENT_CRITERION_MV
 
 
 def max_boost(results: dict, prof: str) -> float:
+    """Largest extra depolarisation (mV) that dendritic Ca_LVA adds at the synapse or tip, over all sites."""
     return float(ca_boost(results, prof).max())
 
 
@@ -114,14 +128,17 @@ def nearest_boosted(results: dict, prof: str, rel=0.10) -> float:
 
 
 def _range(sites) -> str:
+    """'a–b' (µm) for a list of synapse sites, 'none' if empty."""
     return f"{min(sites):g}–{max(sites):g}" if sites else "none"
 
 
 def _keys(grid, mouth=1.0):
+    """The (activation shift, density) pairs of a factorial grid, original kinetics first."""
     return sorted({(s, g) for s, g, m in grid if m == mouth}, key=lambda k: (k[0] != 0, k[1]))
 
 
 def condition_table(grid: dict, mouth=1.0, metric="peak_soma_mV", unit="Somatic EPSP (mV)") -> str:
+    """HTML table: one row per cell and Ca_LVA condition, somatic EPSP at a few distances, event sites and largest boost."""
     head = "".join(f"<th>{s} µm</th>" for s in TABLE_SITES)
     rows = []
     first = grid[next(iter(grid))]
@@ -149,6 +166,7 @@ def condition_table(grid: dict, mouth=1.0, metric="peak_soma_mV", unit="Somatic 
 # --- sections -------------------------------------------------------------------------------------
 
 def design_html(S: dict, cfg: Config) -> str:
+    """Section 'Design and methods in brief': the factors and levels of the study."""
     F = S["factors"]
     meta = load_target_meta()
     return f"""
@@ -179,6 +197,7 @@ triggered by proximal synapses start distally). {cfg.celsius:g} °C, dt {cfg.dt_
 
 
 def geometry_html(cells: dict, mouth_cell, mouth_length_um: float) -> str:
+    """Table, text and figure on the diameter and membrane area of the target dendrite."""
     short, long = cells["short"], cells["long"]
     rows_l = path_geometry(long, reference=short)
     in_short = {r["section"] for r in path_geometry(short)}
@@ -211,6 +230,7 @@ def geometry_html(cells: dict, mouth_cell, mouth_length_um: float) -> str:
 
 
 def morphology_html(cells, mouth_cell, mouth_length_um) -> str:
+    """Section 'Morphologies': dendrograms, geometry and the interactive 3D view."""
     fig3d = viewer3d.morphology_3d(cells["long"], cells["short"].tip_distance)
     return ("<h2 id='morphology'>Morphologies</h2>"
             + _figure(plotting.dendrogram_figure(cells),
@@ -226,6 +246,7 @@ def morphology_html(cells, mouth_cell, mouth_length_um) -> str:
 
 
 def electrotonic_html(cfg: Config, single: dict, mech_cfg: Config) -> str:
+    """Section on impedance along the dendrite and EPSP time course, with key numbers."""
     imp = {"short": mechanism.impedance_profile("short", cfg), "long": mechanism.impedance_profile("long", cfg),
            "long, 1.5× mouth": mechanism.impedance_profile("long", cfg.replace(mouth_scale=1.5))}
     none = {"short": single[(0.0, 1.0, 1.0)]["none"], "long": single[(0.0, 1.0, 1.0)]["none"],
@@ -247,11 +268,11 @@ The short tip has {z(zs, 100):.0f} MΩ, higher than the long dendrite at the sam
 {z(zl, 400, 'ztr_0Hz_MOhm'):.0f} MΩ at 0 Hz, but much more steeply at 100 Hz: slow signals reach the soma much
 better than fast ones.</li>
 <li>Without Ca<sub>LVA</sub>, the local EPSP lasts longer the farther it is from the soma (effective time constant
-{n.tau_eff_ms_syn[10]:.1f} ms at 10 µm, {n.tau_eff_ms_syn[200]:.1f} ms at 200 µm, {n.tau_eff_ms_syn[400]:.1f} ms at
-400 µm), while the somatic EPSP is broadened by dendritic filtering ({n.tau_eff_ms_soma[10]:.1f} →
-{n.tau_eff_ms_soma[400]:.1f} ms). With Ca<sub>LVA</sub> ({mech_cfg.ca_profile}, {mech_cfg.g_ca_mS_cm2:g} mS/cm²,
+{_at(n.tau_eff_ms_syn, 10):.1f} ms at 10 µm, {_at(n.tau_eff_ms_syn, 200):.1f} ms at 200 µm, {_at(n.tau_eff_ms_syn, 400):.1f} ms at
+400 µm), while the somatic EPSP is broadened by dendritic filtering ({_at(n.tau_eff_ms_soma, 10):.1f} →
+{_at(n.tau_eff_ms_soma, 400):.1f} ms). With Ca<sub>LVA</sub> ({mech_cfg.ca_profile}, {mech_cfg.g_ca_mS_cm2:g} mS/cm²,
 {SHIFT_TXT[mech_cfg.ca_act_shift_mV]}), the somatic EPSP integral at 300 µm rises from
-{n.area_mVms_soma[300]:.0f} to {c.area_mVms_soma[300]:.0f} mV·ms.</li>
+{_at(n.area_mVms_soma, 300):.0f} to {_at(c.area_mVms_soma, 300):.0f} mV·ms.</li>
 <li>The wider mouth lowers the impedance near the soma only (at 10 µm: {z(imp['long, 1.5× mouth'], 10):.0f} against
 {z(zl, 10):.0f} MΩ) and leaves the distal dendrite unchanged.</li>
 </ul>""" + _figure(fig, "<b>Electrotonic structure.</b> <b>a</b>, Local input impedance along the target dendrite "
@@ -264,6 +285,7 @@ better than fast ones.</li>
 
 
 def single_html(single: dict) -> str:
+    """Section on single synaptic events across the factorial design, with per-condition details."""
     out = ["<h2 id='single'>Single synaptic events: density × kinetics × profile</h2>",
            condition_table(single),
            _figure(plotting.factorial_figure(single),
@@ -285,6 +307,7 @@ def single_html(single: dict) -> str:
 
 
 def mouth_html(single: dict) -> str:
+    """Section on the effect of the 1.5x wider proximal diameter."""
     fig = plotting.mouth_figure(single)
     if fig is None:
         return ""
@@ -302,7 +325,7 @@ def mouth_html(single: dict) -> str:
     return (f"<h2 id='mouth'>A wider dendritic mouth</h2><ul>"
             f"<li>Widening the first {single[(0.0, 1.0, 1.5)]['none'].config.mouth_length_um:g} µm of the target dendrite (×1.5 at the soma) changes somatic EPSPs by "
             f"{ch.min():+.1f}% to {ch.max():+.1f}% across all sites and conditions; the largest change is for the most "
-            f"proximal synapses (10 µm: {near[10]:.2f} → {near_w[10]:.2f} mV without Ca<sub>LVA</sub>).</li>"
+            f"proximal synapses (10 µm: {_at(near, 10):.2f} → {_at(near_w, 10):.2f} mV without Ca<sub>LVA</sub>).</li>"
             f"<li>The sites that trigger a Ca<sub>LVA</sub> event are unchanged (increasing profile: "
             + "; ".join(f"{g:g} mS/cm² {SHIFT_TXT[s]}: {a} → {b}" for (s, g), (a, b) in ev.items()) + ").</li></ul>"
             + _figure(fig, "<b>Wider mouth.</b> Relative change of the somatic EPSP with the 1.5× mouth, against "
@@ -310,6 +333,7 @@ def mouth_html(single: dict) -> str:
 
 
 def train_html(train: dict) -> str:
+    """Section on trains of synaptic inputs."""
     return ("<h2 id='train'>Trains of 5 inputs at 50 Hz</h2>"
             + condition_table(train, unit="Largest somatic depolarisation (mV)")
             + _figure(plotting.factorial_figure(train),
@@ -318,11 +342,13 @@ def train_html(train: dict) -> str:
 
 
 def _fired(res, morph="long"):
+    """Synapse sites (µm) that make the cell fire at least one somatic spike."""
     s = res.summary
     return s[(s.morphology == morph) & (s.n_spikes_soma > 0)].site_um.tolist()
 
 
 def bias_html(bias: dict, S: dict) -> str:
+    """Section on firing with a steady somatic bias current (tables and figures per condition)."""
     out = ["<h2 id='bias'>Firing with a steady somatic current</h2>"
            f"<p class='meta'>{S['bias']['note']} Density {', '.join(f'{g:g}' for g in S['bias']['g_ca_mS_cm2'])} "
            "mS/cm². Cells: synapse sites that make the cell fire at least one spike.</p>"]
@@ -353,6 +379,7 @@ def bias_html(bias: dict, S: dict) -> str:
 
 
 def noise_html(spikes, examples, S: dict) -> str:
+    """Section on firing with a noisy somatic current: table of extra spikes, early/late split, figure."""
     N = S["noise"]
     ev = studies.evoked_spikes(spikes, N)
     rows = []
@@ -407,6 +434,7 @@ def noise_html(spikes, examples, S: dict) -> str:
 
 
 def _threshold_sentence(th) -> str:
+    """Sentence describing the threshold synaptic weight for an event against distance."""
     fail = th[th.threshold_nS.isna()].distance_um
     ok = th[th.threshold_nS.notna()].sort_values("distance_um")
     parts = []
@@ -422,6 +450,7 @@ def _threshold_sentence(th) -> str:
 
 
 def mechanism_html(D: dict) -> str:
+    """Section 'Mechanism': numbered findings with numbers from mechanism.collect() and Figure M."""
     cfg = D["cfg"]
     th = D["thresholds"]
     onset = {t: mechanism.onset_um(df) for t, df in D["tau"].items()}
@@ -463,6 +492,7 @@ Slowing the synaptic decay moves the onset towards the soma:
 # --- summary --------------------------------------------------------------------------------------
 
 def executive_html(single, train, bias, noise_ev, D, S) -> str:
+    """The 'Key results' box at the top of the report, every number computed from the results."""
     n = single[(0.0, 1.0, 1.0)]["none"]
     items = [
         f"<b>A longer dendrite loses its distal inputs.</b> Without Ca<sub>LVA</sub>, a synapse at the 400 µm tip moves "
@@ -507,8 +537,13 @@ def executive_html(single, train, bias, noise_ev, D, S) -> str:
 
 # --- build ----------------------------------------------------------------------------------------
 
-def build(set_file=None, out=None, progress=None, write_html=True) -> Path:
-    S = studies.spec(set_file)
+def build(set_file=None, out=None, progress=None, write_html=True, S=None) -> Path:
+    """Run (or load) every study, save all figures and write the HTML report.
+
+    `S` is the study definition (default: configs/studies.json); the notebook passes a reduced one
+    in quick mode. Results are cached, so a second call only redraws.
+    """
+    S = S or studies.spec(set_file)
     out = Path(out or FIGURES_DIR / "report.html")
     cfg = studies.base_config(S)
     M = S["mechanism"]
@@ -545,6 +580,11 @@ def build(set_file=None, out=None, progress=None, write_html=True) -> Path:
          manuscript.html(single, train, bias, noise_ev, D, cells, cfg, S, noise_split)),
     ]
     toc = "".join(f"<li><a href='#{a}'>{t}</a></li>" for a, t, _ in sections)
+    quick_note = ""
+    if S.get("base_overrides"):
+        quick_note = ("<p class='meta'><b>Quick mode</b> (notebooks/figures.ipynb): synapses every "
+                      f"{cfg.site_step_um:g} µm from {cfg.site_start_um:g} µm and fewer trials; values quoted at "
+                      "distances that were not simulated refer to the nearest simulated site.</p>")
     page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PV dendrite report</title><style>{CSS}</style></head>
@@ -553,6 +593,7 @@ def build(set_file=None, out=None, progress=None, write_html=True) -> Path:
 <p class="meta">Generated {dt.datetime.now():%Y-%m-%d %H:%M} · pvdend {__version__} · NEURON {neuron.__version__}
 · studies <code>configs/studies.json</code></p>
 {executive_html(single, train, bias, noise_ev, D, S)}
+{quick_note}
 <nav><ol>{toc}</ol></nav>
 {''.join(body for _, _, body in sections)}
 <p class="ai">{AI_STATEMENT}</p>

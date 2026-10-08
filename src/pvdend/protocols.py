@@ -46,6 +46,7 @@ def _rheobase_key(morph: str, cfg: Config) -> str:
 
 
 def _spikes(v) -> int:
+    """Number of upward crossings of the spike threshold (0 mV) in a voltage trace."""
     v = np.asarray(v)
     return int(np.sum((v[1:] >= SPIKE_THRESHOLD_MV) & (v[:-1] < SPIKE_THRESHOLD_MV)))
 
@@ -65,6 +66,7 @@ def rheobase_nA(morph: str, cfg: Config, tol=0.002) -> float:
     v = h.Vector().record(cell.soma[0](0.5)._ref_v)
 
     def fires(amp):
+        """Does a current step of `amp` nA evoke at least one spike?"""
         stim.amp = amp
         steady_state_init(cfg.v_init_mV)
         h.continuerun(stim.delay + stim.dur + 20)
@@ -86,10 +88,12 @@ def rheobase_nA(morph: str, cfg: Config, tol=0.002) -> float:
 
 
 def bias_nA(morph: str, cfg: Config) -> float:
+    """Steady somatic current (nA) for cfg.soma_bias_frac of the cell's rheobase (0 if no bias)."""
     return cfg.soma_bias_frac * rheobase_nA(morph, cfg) if cfg.soma_bias_frac > 0 else 0.0
 
 
 def site_distances(cfg: Config, tip_um: float) -> np.ndarray:
+    """Synapse distances (µm) of a sweep: cfg.sites_um, or every site_step_um up to the tip."""
     if cfg.sites_um is not None:
         d = np.asarray(cfg.sites_um, dtype=float)
     else:
@@ -98,25 +102,40 @@ def site_distances(cfg: Config, tip_um: float) -> np.ndarray:
 
 
 def steady_state_init(v_init: float):
-    """finitialize, then integrate to rest with large implicit steps (t < 0)."""
+    """Start every simulation from the cell's steady state (rest, or the depolarised state with a bias).
+
+    finitialize sets all voltages to v_init and the gates to their steady states at v_init, which is not
+    yet the resting state of the whole cell. A few backward-Euler steps of 10^9 ms at negative times then
+    relax every state variable to its true steady state (backward Euler is unconditionally stable, so the
+    huge steps are safe). Time is reset to 0 and the recordings restart, so recorded traces begin at rest.
+    """
     h.finitialize(v_init)
     dt = h.dt
-    h.t, h.dt = -1e10, 1e9
+    h.t, h.dt = -1e10, 1e9  # ~9 implicit steps from t = -1e10 to -1e9 ms
     while h.t < -1e9:
         h.fadvance()
-    h.t, h.dt = 0.0, dt
-    h.fcurrent()
-    h.frecord_init()
+    h.t, h.dt = 0.0, dt  # back to the normal time step, at t = 0
+    h.fcurrent()  # recompute currents for the relaxed state
+    h.frecord_init()  # discard the samples recorded during the relaxation
 
 
 def _rec(ref):
+    """A NEURON Vector recording the variable `ref` at every time step."""
     return h.Vector().record(ref)
 
 
 def run_site(cell: PVCell, cfg: Config, distance_um: float) -> dict:
-    """Simulate one synapse at `distance_um`; returns traces (numpy arrays)."""
+    """Simulate one synapse at `distance_um` (path distance from the soma); returns traces (numpy arrays).
+
+    The cell must already be configured (calcium.configure). Traces: time, membrane potential at the soma,
+    at the synapse and at the dendritic tip, synaptic conductance, and [Ca2+]_i / I_Ca where present.
+    """
     amp = bias_nA(cell.label, cfg)  # first: may run its own (cached) rheobase simulations
     h.celsius, h.dt = cfg.celsius, cfg.dt_ms
+
+    # Synapse: an Exp2Syn conductance at the segment containing the requested distance, driven by a
+    # NetStim that fires once (or n_events times at freq_hz) from onset_ms; the NetCon weight is the
+    # peak conductance in µS.
     sec, x, actual = path_location(cell, cell.target_path, distance_um)
     syn = h.Exp2Syn(sec(x))
     syn.tau1, syn.tau2, syn.e = cfg.syn_tau1_ms, cfg.syn_tau2_ms, cfg.syn_e_mV
@@ -125,10 +144,12 @@ def run_site(cell: PVCell, cfg: Config, distance_um: float) -> dict:
         cfg.onset_ms, cfg.n_events, cfg.interval_ms, 0)
     nc = h.NetCon(stim, syn)
     nc.weight[0], nc.delay = cfg.syn_weight_uS, 0
+    # Optional steady somatic current (0 nA without bias); active also during the initialisation.
     bias = h.IClamp(cell.soma[0](0.5))
     bias.delay, bias.dur = ALWAYS_ON["delay"], ALWAYS_ON["dur"]
     bias.amp = amp
 
+    # Recordings (every time step).
     tip = cell.target_path[-1](1.0)
     recs = {"t": _rec(h._ref_t), "v_soma": _rec(cell.soma[0](0.5)._ref_v),
             "v_syn": _rec(sec(x)._ref_v), "v_tip": _rec(tip._ref_v),
@@ -142,6 +163,7 @@ def run_site(cell: PVCell, cfg: Config, distance_um: float) -> dict:
     steady_state_init(cfg.v_init_mV)
     h.continuerun(cfg.tstop_ms)
 
+    # Copy to numpy; the NEURON objects (synapse, stimulus, clamp) are freed when the function returns.
     out = {k: np.array(v) for k, v in recs.items()}
     out.update(site_um=distance_um, site_actual_um=actual, section=sec.name().split(".")[-1], x=x,
                bias_nA=bias.amp)
@@ -226,12 +248,14 @@ def measure(tr: dict, cfg: Config) -> dict:
 
 @dataclass
 class Result:
+    """Outcome of a sweep: its Config, one summary row per (morphology, site), traces and Ca_LVA profiles."""
     config: Config
     summary: pd.DataFrame
     traces: dict = field(default_factory=dict)  # (morph, site_um) -> trace dict
     ca_profiles: dict = field(default_factory=dict)  # morph -> DataFrame(distance, gbar)
 
     def save(self, folder: str | Path | None = None) -> Path:
+        """Write the result to `folder` (default results/<name>/): config.json, summary.csv, traces.npz."""
         folder = Path(folder or RESULTS_DIR / self.config.name)
         folder.mkdir(parents=True, exist_ok=True)
         self.config.to_json(folder / "config.json")
@@ -248,6 +272,7 @@ class Result:
 
     @classmethod
     def load(cls, folder: str | Path) -> "Result":
+        """Read a result written by save() (recomputing summary columns added since it was saved)."""
         folder = Path(folder)
         cfg = Config.from_json(folder / "config.json")
         summary = pd.read_csv(folder / "summary.csv")
@@ -266,8 +291,12 @@ class Result:
 
 
 def run_sweep(cfg: Config, progress=None, keep_traces=True) -> Result:
-    """Run every site of every morphology in `cfg`. `progress(i, n, text)` is optional."""
-    jobs = []
+    """Run every site of every morphology in `cfg`. `progress(i, n, text)` is optional.
+
+    One cell per morphology is built (or taken from the cache) and configured once; then the synapse is
+    moved from site to site, one simulation each. Every simulation is summarised by measure().
+    """
+    jobs = []  # (morphology, synapse distance) pairs
     for morph in cfg.morphologies:
         cell = get_cell(morph, cfg)
         jobs += [(morph, d) for d in site_distances(cfg, cell.tip_distance)]
@@ -275,7 +304,7 @@ def run_sweep(cfg: Config, progress=None, keep_traces=True) -> Result:
     rows, traces, profiles = [], {}, {}
     current = None
     for i, (morph, d) in enumerate(jobs):
-        if morph != current:
+        if morph != current:  # new morphology: configure its channels and store the Ca_LVA profile
             cell = get_cell(morph, cfg)
             g = calcium.configure(cell, cfg)
             profiles[morph] = pd.DataFrame({
@@ -313,7 +342,11 @@ def load_or_run(cfg: Config, folder=None, force=False, progress=None) -> Result:
 # --- noisy somatic current ---------------------------------------------------------------------
 
 def ou_current(n: int, dt: float, tau_ms: float, sigma: float, seed: int) -> np.ndarray:
-    """Ornstein-Uhlenbeck process (zero mean, standard deviation sigma, correlation time tau_ms)."""
+    """Ornstein-Uhlenbeck process (zero mean, standard deviation sigma, correlation time tau_ms).
+
+    Exact discretisation on the time grid: x[i] = a x[i-1] + sigma sqrt(1 - a^2) z[i], a = exp(-dt/tau),
+    with z independent standard Gaussian numbers; x[0] is drawn from the stationary distribution.
+    """
     rng = np.random.default_rng(seed)
     a = np.exp(-dt / tau_ms)
     b = sigma * np.sqrt(1 - a * a)
@@ -327,10 +360,19 @@ def ou_current(n: int, dt: float, tau_ms: float, sigma: float, seed: int) -> np.
 
 def run_noise_trial(cell, cfg: Config, site_um, seed: int, mu_nA: float, sigma_nA: float, tau_ms: float,
                     onset_ms: float, tstop_ms: float, keep_trace=False) -> dict:
-    """Soma driven by DC mu + OU noise; one synapse at `site_um` (None: no synapse) activated at onset_ms."""
+    """Soma driven by DC mu + OU noise; one synapse at `site_um` (None: no synapse) activated at onset_ms.
+
+    The same `seed` gives the same noise, so a run with and a run without the synapse differ only by the
+    synapse. With cfg.n_events > 1 the synapse is activated repeatedly (one 'block' of inputs). Returns the
+    somatic spike times (ms), and the somatic voltage trace if `keep_trace`.
+    """
     h.celsius, h.dt = cfg.celsius, cfg.dt_ms
+    # Mean current: a clamp that is on from the initialisation onwards, so the cell starts at its
+    # depolarised steady state.
     bias = h.IClamp(cell.soma[0](0.5))
     bias.delay, bias.dur, bias.amp = ALWAYS_ON["delay"], ALWAYS_ON["dur"], mu_nA
+    # Fluctuating part: a second clamp whose amplitude follows a precomputed OU sequence, one value per
+    # time step, played into the clamp by NEURON (Vector.play with interpolation).
     noise = h.IClamp(cell.soma[0](0.5))
     noise.delay, noise.dur = 0.0, tstop_ms
     n = int(round(tstop_ms / cfg.dt_ms)) + 2
@@ -347,6 +389,7 @@ def run_noise_trial(cell, cfg: Config, site_um, seed: int, mu_nA: float, sigma_n
         nc = h.NetCon(stim, syn)
         nc.weight[0], nc.delay = cfg.syn_weight_uS, 0
         objs = [syn, stim, nc]
+    # Spike detector: records the time of each upward crossing of 0 mV at the soma.
     spikes = h.Vector()
     det = h.NetCon(cell.soma[0](0.5)._ref_v, None, sec=cell.soma[0])
     det.threshold = SPIKE_THRESHOLD_MV
@@ -358,7 +401,7 @@ def run_noise_trial(cell, cfg: Config, site_um, seed: int, mu_nA: float, sigma_n
     out = {"spikes": np.array(spikes)}
     if keep_trace:
         out.update(t=np.array(rec_t), v_soma=np.array(rec_v))
-    bias.amp = 0
+    bias.amp = 0  # leave the cell as found (the cell object is cached and reused)
     i_vec.play_remove()
     del objs
     return out
