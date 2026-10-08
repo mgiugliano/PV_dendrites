@@ -232,13 +232,13 @@ def overview_figure(result, cells: dict, sites_for_traces=None):
 
     long_g = result.ca_profiles["long"]["gbar_Ca_LVA_S_cm2"].to_numpy() if "long" in result.ca_profiles else None
     sites = sites_for_traces or [25, 50, 75, 100, 150, 200, 250, 300, 350, 400]
-    basis = view_basis(cells.get("long") or next(iter(cells.values())))
+    xmax = 1.02 * max(c.distance(s(1)) for c in cells.values() for s in c.dend)
     for col, morph in enumerate(("short", "long")):
         ax = fig.add_subplot(gs[0, col])
         if morph in cells:
             g = long_g if morph == "long" else None
-            plot_morphology(ax, cells[morph], gbar=g, basis=basis,
-                            sites_um=[s for s in sites if s <= cells[morph].tip_distance])
+            plot_dendrogram(ax, cells[morph], gbar=g, sites_um=sites, xmax=xmax,
+                            mark_um=cells["short"].tip_distance if morph == "long" and "short" in cells else None)
             ax.set_title(MORPH_STYLE[morph]["label"], color=INK)
         else:
             ax.axis("off")
@@ -455,4 +455,108 @@ def mechanism_figure(D: dict):
 
     for ax, letter in zip(a, "abcdefghi"):
         panel_label(ax, letter)
+    return fig
+
+
+# --- dendrogram -----------------------------------------------------------------------------
+
+def _dendro_layout(cell):
+    """{section: (d_start, d_end, y)}; leaves get consecutive y, parents the mean of their children."""
+    from .morphology import children
+    layout, next_y = {}, [0.0]
+
+    def place(sec):
+        kids = children(sec)
+        ys = [place(k) for k in kids]
+        y = float(np.mean(ys)) if ys else next_y[0]
+        if not ys:
+            next_y[0] += 1.0
+        layout[sec] = (cell.distance(sec(0)), cell.distance(sec(1)), y)
+        return y
+
+    for sec in (s for s in cell.dend if _parent_or_none(s) == cell.soma[0]):  # primary dendrites
+        place(sec)
+        next_y[0] += 0.6  # gap between primary trees
+    return layout
+
+
+def _parent_or_none(sec):
+    from .morphology import parent
+    return parent(sec)
+
+
+def plot_dendrogram(ax, cell, gbar=None, gmax=None, mark_um=None, sites_um=None, xmax=None):
+    """Dendrogram of the basal tree; the target path is highlighted (or coloured by Ca_LVA)."""
+    from .morphology import children
+    lay = _dendro_layout(cell)
+    path = set(cell.target_path)
+    base, conn = [], []
+    for sec, (d0, d1, y) in lay.items():
+        if sec not in path:
+            base.append([(d0, y), (d1, y)])
+        kids = children(sec)
+        if kids:
+            ys = [lay[k][2] for k in kids] + [y]
+            conn.append([(d1, min(ys)), (d1, max(ys))])
+        if _parent_or_none(sec) == cell.soma[0]:
+            conn.append([(0, y), (d0, y)])
+    ys_all = [v[2] for v in lay.values()]
+    conn.append([(0, min(ys_all)), (0, max(ys_all))])
+    ax.add_collection(LineCollection(base + conn, colors="#b5b4ae", linewidths=0.6))
+
+    segs = [(seg, d) for seg, d in cell.path_segments()]
+    lines, prev = [], cell.distance(cell.target_path[0](0))
+    for (seg, d), nxt in zip(segs, [d for _, d in segs[1:]] + [cell.tip_distance]):
+        y = lay[seg.sec][2]
+        end = (d + nxt) / 2 if nxt != cell.tip_distance else cell.tip_distance
+        lines.append([(prev, y), (end, y)])
+        prev = end
+    if gbar is not None and np.any(np.asarray(gbar) > 0):
+        lc = LineCollection(lines, cmap=CA_CMAP, norm=mpl.colors.Normalize(0, gmax or np.max(gbar)),
+                            linewidths=2.2)
+        lc.set_array(np.asarray(gbar))
+        ax.add_collection(lc)
+        cax = ax.inset_axes([0.76, 0.9, 0.2, 0.035])  # inside the panel: keeps x axes aligned
+        cb = plt.colorbar(lc, cax=cax, orientation="horizontal")
+        cb.set_label("Ca$_{LVA}$ g (S/cm²)", fontsize=6, labelpad=1)
+        cb.ax.xaxis.set_label_position("top")
+        cb.set_ticks([0, lc.norm.vmax])
+        cb.ax.xaxis.set_major_formatter(mpl.ticker.FormatStrFormatter("%g"))
+        cb.ax.tick_params(labelsize=5, width=0.5, length=2)
+        cb.outline.set_linewidth(0.5)
+    else:
+        ax.add_collection(LineCollection(lines, colors=MORPH_STYLE[cell.label]["color"], linewidths=2.2))
+    if sites_um is not None:
+        from .morphology import path_location
+        for d in (d for d in sites_um if d <= cell.tip_distance + 1e-3):
+            sec, _, _ = path_location(cell, cell.target_path, d)
+            ax.plot(d, lay[sec][2], "o", ms=2.5, mfc="white", mec=INK, mew=0.5, zorder=5)
+    if mark_um is not None:
+        y = lay[cell.target_path[-1]][2]
+        ax.plot([mark_um], [y], "|", color=INK, ms=7, mew=1)
+        ax.annotate("original tip", (mark_um, y), xytext=(0, 5), textcoords="offset points",
+                    ha="center", fontsize=6)
+    ax.autoscale_view()
+    ax.set_xlim(0, xmax)
+    ax.invert_yaxis()
+    ax.set_yticks([])
+    ax.spines["left"].set_visible(False)
+    ax.set_xlabel("Path distance from soma (µm)")
+
+
+def dendrogram_figure(cells: dict, gbar=None, gmax=None):
+    """Short and long dendrograms on a shared distance axis."""
+    set_style()
+    fig, axes = plt.subplots(len(cells), 1, figsize=(TWO_COL, 62 * MM * len(cells)), sharex=True,
+                             layout="constrained")
+    axes = np.atleast_1d(axes)
+    short_tip = cells["short"].tip_distance if "short" in cells else None
+    xmax = 1.02 * max(c.distance(s(1)) for c in cells.values() for s in c.dend)
+    for ax, (m, cell) in zip(axes, cells.items()):
+        plot_dendrogram(ax, cell, gbar=gbar if m == "long" else None, gmax=gmax, xmax=xmax,
+                        mark_um=short_tip if m == "long" else None)
+        ax.set_title(f"{MORPH_STYLE[m]['label']}: target dendrite ends at {cell.tip_distance:.1f} µm",
+                     loc="left")
+    for ax in axes[:-1]:
+        ax.set_xlabel("")
     return fig

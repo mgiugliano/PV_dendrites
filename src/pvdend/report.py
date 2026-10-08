@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import neuron
 import numpy as np
 
-from . import __version__, mechanism, plotting
+from . import __version__, mechanism, plotting, viewer3d
 from ._paths import CONFIG_DIR, FIGURES_DIR
 from .config import Config
 from .morphology import load_target_meta
@@ -36,8 +36,9 @@ CAPTION_COMPARISON = (
     "and lifts the somatic EPSP (<b>b</b>, <b>f</b>). Why this happens only beyond a certain distance is "
     "explained in the <a href='#mechanism'>Mechanism</a> section.")
 CAPTION_OVERVIEW = (
-    "<b>a, b</b>, Short and long morphologies; the target dendrite is highlighted (in <b>b</b> coloured by "
-    "Ca<sub>LVA</sub> density) and circles mark the synapse sites whose traces are shown. "
+    "<b>a, b</b>, Dendrograms of the short and long cells (branches laid out by path distance from the soma); "
+    "the target dendrite is highlighted (in <b>b</b> coloured by Ca<sub>LVA</sub> density, with a tick at the "
+    "original tip) and circles mark the synapse sites whose traces are shown. "
     "<b>c</b>, Ca<sub>LVA</sub> density along the long dendrite. <b>d, e</b>, Somatic membrane potential for "
     "synapses at increasing distance (colour scale). <b>f</b>, Membrane potential at the synapse, long "
     "morphology. <b>g–i</b>, Somatic EPSP, local EPSP and attenuation versus synapse distance. "
@@ -333,10 +334,28 @@ def build(set_file=None, out=None, progress=None) -> Path:
     toc, body = [], []
     cells = {m: get_cell(m, base) for m in ("short", "long")}
     body.append("<h2 id='morphology'>Morphologies</h2>")
-    body.append(f"<figure>{_svg(plotting.morphology_figure(cells))}<figcaption>Short (left) and long (right) "
-                "morphologies in the same orientation. The target dendrite is highlighted; circles every "
-                "50 µm.</figcaption></figure>")
+    body.append(f"<figure>{_svg(plotting.dendrogram_figure(cells))}<figcaption><b>Dendrograms.</b> Every "
+                "basal branch drawn at its path distance from the soma (x) and stacked by primary dendrite (y); "
+                "vertical lines are branch points. The target dendrite is highlighted. Top: short cell, the "
+                f"target dendrite ends at {cells['short'].tip_distance:.1f} µm. Bottom: long cell, the same "
+                f"dendrite continues from the original tip (tick) to {cells['long'].tip_distance:.1f} µm. All other "
+                "branches are identical; note that the longest original branch of the cell reaches "
+                f"{max(cells['short'].distance(s(1)) for s in cells['short'].dend):.0f} µm."
+                "</figcaption></figure>")
+    fig3d = viewer3d.morphology_3d(cells["long"], cells["short"].tip_distance)
+    body.append("<figure>" + fig3d.to_html(full_html=False, include_plotlyjs=True,
+                                            config={"displaylogo": False})
+                + "<figcaption><b>Interactive 3D view</b> of the long cell. Drag to rotate, scroll to zoom, "
+                "double-click to reset. Black: the original target dendrite (the whole of it in the short cell); "
+                "blue: the grown extension. Click <i>grown extension</i> in the legend to hide it and see the "
+                "short cell. The reconstructed cell is nearly flat; the random-walk extension leaves that plane."
+                "</figcaption></figure>")
+    body.append(f"<details><summary>2D projection of both cells</summary><figure>"
+                f"{_svg(plotting.morphology_figure(cells))}<figcaption>Short (left) and long (right) cells "
+                "projected on the plane that best shows the target dendrite; circles every 50 µm."
+                "</figcaption></figure></details>")
     toc.append("<li><a href='#morphology'>Morphologies</a></li>")
+    n_morph = len(body)
 
     for k, entry in enumerate(entries, 1):
         cfg0 = Config.from_json(CONFIG_DIR / entry["base"]).replace(**entry.get("overrides", {}))
@@ -367,7 +386,7 @@ def build(set_file=None, out=None, progress=None) -> Path:
     ref = {p: load_or_run(Config.from_json(CONFIG_DIR / first["base"]).replace(
         **first.get("overrides", {}), name=f"{first['name']}__{p}", ca_profile=p)) for p in first["profiles"]}
     toc.insert(1, "<li><a href='#mechanism'>Mechanism: why only distal synapses trigger a Ca event</a></li>")
-    body.insert(2, mechanism_html(D, ref))
+    body.insert(n_morph, mechanism_html(D, ref))  # right after the morphology section
     plotting.save_figure(plotting.mechanism_figure(D), "mechanism/mechanism", formats=("pdf", "png"))
 
     page = f"""<!doctype html>

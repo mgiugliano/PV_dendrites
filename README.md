@@ -137,6 +137,7 @@ src/pvdend/
   calcium.py            dendritic Ca_LVA profiles, somatic Ca_LVA switch, TTX
   protocols.py          synaptic sweep, recordings, measurements, saving/loading
   plotting.py           publication figures (used by scripts and notebook)
+  viewer3d.py           interactive 3D view (plotly): rotate, zoom, toggle the grown extension
   mechanism.py          analyses explaining where the Ca_LVA event appears (impedance, EPSP duration, thresholds)
   report.py             single-page HTML report of the whole figure set, with the mechanism section
   gui.py                ipywidgets explorer for the notebook
