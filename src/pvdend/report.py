@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import neuron
 import numpy as np
 
-from . import __version__, mechanism, plotting, viewer3d
+from . import __version__, manuscript, mechanism, plotting, viewer3d
 from ._paths import CONFIG_DIR, FIGURES_DIR
 from .config import Config
 from .morphology import load_target_meta, path_geometry
@@ -63,6 +63,8 @@ th { font-weight:600; } .tablewrap { overflow-x:auto; }
 code { font-size:13px; background:#efeeea; padding:1px 4px; border-radius:3px; }
 details { margin:8px 0; } summary { cursor:pointer; color:var(--accent); }
 nav ol { padding-left:20px; } a { color:var(--accent); }
+.eq { text-align:center; margin:10px 0; } .legend { margin:14px 0; }
+ol.refs li { margin:4px 0; }
 .swatch { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }
 @media print { details { display:block; } summary { display:none; } h2 { break-before:page; }
                figure { break-inside:avoid; } }
@@ -405,6 +407,7 @@ def build(set_file=None, out=None, progress=None) -> Path:
     toc.append("<li><a href='#morphology'>Morphologies</a></li>")
     n_morph = len(body)
 
+    all_results = {}
     for k, entry in enumerate(entries, 1):
         cfg0 = Config.from_json(CONFIG_DIR / entry["base"]).replace(**entry.get("overrides", {}))
         results = {}
@@ -414,6 +417,7 @@ def build(set_file=None, out=None, progress=None) -> Path:
                 progress(cfg.name)
             results[prof] = load_or_run(cfg)
         anchor = entry["name"]
+        all_results[anchor] = results
         toc.append(f"<li><a href='#{anchor}'>{html.escape(anchor)}</a></li>")
         body.append(f"<h2 id='{anchor}'>{k}. {html.escape(anchor)}</h2>")
         body.append(f"<p class='meta'>{describe_html(cfg0)}</p>")
@@ -436,6 +440,10 @@ def build(set_file=None, out=None, progress=None) -> Path:
     toc.insert(1, "<li><a href='#mechanism'>Mechanism: why only distal synapses trigger a Ca event</a></li>")
     body.insert(n_morph, mechanism_html(D, ref))  # right after the morphology section
     plotting.save_figure(plotting.mechanism_figure(D), "mechanism/mechanism", formats=("pdf", "png"))
+    body.append(manuscript.html(all_results, D, cells, base))
+    toc += ["<li><a href='#manuscript'>Draft manuscript material</a>: <a href='#ms-methods'>Methods</a> · "
+            "<a href='#ms-results'>Results</a> · <a href='#ms-legends'>Figure legends</a> · "
+            "<a href='#references'>References</a></li>"]
 
     page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

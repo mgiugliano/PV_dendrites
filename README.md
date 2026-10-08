@@ -140,6 +140,7 @@ src/pvdend/
   viewer3d.py           interactive 3D view (plotly): rotate, zoom, toggle the grown extension
   mechanism.py          analyses explaining where the Ca_LVA event appears (impedance, EPSP duration, thresholds)
   report.py             single-page HTML report of the whole figure set, with the mechanism section
+  manuscript.py         draft Methods, Results, figure legends and references (numbers filled in from the data)
   gui.py                ipywidgets explorer for the notebook
 scripts/                make_morphology.py, run.py, make_all_figures.py, make_report.py
 configs/                default.json, figure_set.json (+ configs saved from the notebook)
