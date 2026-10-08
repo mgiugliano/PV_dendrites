@@ -871,47 +871,85 @@ def electrotonic_figure(imp: dict, grid_none: dict, grid_ca=None, ca_label_text=
     return fig
 
 
-def noise_figure(df, examples: dict, evoked, example_conditions, example_site_um, spec_noise):
-    """Noisy somatic current: example traces, evoked spike probability and latency against distance."""
+NOISE_STYLE_BASE = {"short": dict(color=INK_2, ls="--"), "long, no Ca_LVA": dict(color=INK, ls="-")}
+
+
+def noise_style(cond: str) -> dict:
+    if cond in NOISE_STYLE_BASE:
+        return dict(NOISE_STYLE_BASE[cond])
+    prof = "increasing" if "increasing" in cond else "uniform"
+    return dict(color=PROFILE_COLORS[prof], ls="-" if "shifted" in cond else ":")
+
+
+def _smooth(y, k=3):
+    return np.convolve(y, np.ones(k) / k, mode="same")
+
+
+def noise_figure(psth_data: dict, evoked, examples: dict, N: dict, psth_sites=(100, 200, 300),
+                 example_conditions=None):
+    """Noisy somatic current: example traces, PSTHs of the spikes added by the synapse, evoked spikes vs distance."""
     set_style()
-    fig = plt.figure(figsize=(TWO_COL, 110 * MM), layout="constrained")
-    gs = fig.add_gridspec(2, 2)
-    for j, cond in enumerate(example_conditions):
-        ax = fig.add_subplot(gs[0, j])
+    fig = plt.figure(figsize=(TWO_COL, 165 * MM), layout="constrained")
+    gs = fig.add_gridspec(3, 6)
+    conds = list(dict.fromkeys(evoked.condition))
+    example_conditions = example_conditions or conds[1:2] + conds[-1:]
+    letters = iter("abcdefghij")
+    for j, cond in enumerate(example_conditions[:2]):
+        ax = fig.add_subplot(gs[0, 3 * j:3 * j + 3])
         ex = examples.get(cond, {})
-        on = spec_noise["warmup_ms"]
-        for i in range(3):
-            for tag, col, lw in (("nosyn", "#b5b4ae", 0.6), ("syn", PROFILE_COLORS["uniform"], 0.8)):
-                if f"{tag}_{i}_t" in ex:
-                    off = -i * 0  # overlay
-                    ax.plot(ex[f"{tag}_{i}_t"] - on, ex[f"{tag}_{i}_v"] + off, color=col, lw=lw)
-        ax.axvline(0, color=INK, lw=0.6, ls=":")
-        ax.set(xlim=(-60, spec_noise["window_ms"] + 15), xlabel="Time from synaptic input (ms)",
-               ylabel="V$_{soma}$ (mV)", title=f"{cond}: synapse at {example_site_um:g} µm")
-        ax.plot([], [], color="#b5b4ae", label="noise only")
-        ax.plot([], [], color=PROFILE_COLORS["uniform"], label="noise + synapse (same noise)")
+        for tag, col, lw, lab in (("nosyn", "#b5b4ae", 0.7, "noise only"),
+                                  ("syn", PROFILE_COLORS["uniform"], 0.9, "noise + synapse (same noise)")):
+            if tag in ex:
+                ax.plot(*ex[tag], color=col, lw=lw, label=lab)
+        for k in range(2):
+            ax.axvline(k * N["period_ms"], color=INK, lw=0.6, ls=":")
+        ax.set(xlim=(-50, 2 * N["period_ms"] - 50), xlabel="Time from first synaptic input (ms)", ylabel="V$_{soma}$ (mV)",
+               title=f"{cond.replace('Ca_LVA', 'Ca$_{LVA}$')}: synapse at {N['example_site_um']:g} µm")
         if j == 0:
-            ax.legend(loc="upper left", fontsize=5.5)
-        panel_label(ax, "ab"[j])
-    ax_p = fig.add_subplot(gs[1, 0])
-    ax_l = fig.add_subplot(gs[1, 1])
-    palette = {"short": dict(color=INK_2, ls="--"), "long, no Ca_LVA": dict(color=INK, ls="-")}
+            ax.legend(loc="upper right", fontsize=5.5)
+        panel_label(ax, next(letters))
+    top = 0.0
+    axes_p = []
+    for j, site in enumerate(psth_sites):
+        ax = fig.add_subplot(gs[1, 2 * j:2 * j + 2])
+        for cond in conds:
+            if (cond, site) not in psth_data:
+                continue
+            t, h1, h0 = psth_data[(cond, site)]
+            y = _smooth(h1 - h0)
+            top = max(top, y.max())
+            ax.plot(t, y, lw=1, **noise_style(cond))
+        ax.axhline(0, color=INK_2, lw=0.5)
+        ax.axvline(0, color=INK, lw=0.6, ls=":")
+        ax.set(xlim=(-20, 100), xlabel="Time from synaptic input (ms)", title=f"Synapse at {site:g} µm",
+               ylabel="Extra firing rate (Hz)" if j == 0 else "")
+        axes_p.append(ax)
+        panel_label(ax, next(letters))
+    for ax in axes_p:
+        ax.set_ylim(top=top * 1.1)
+    ax = fig.add_subplot(gs[2, 0:3])
     for cond, grp in evoked.groupby("condition", sort=False):
-        if cond in palette:
-            st = palette[cond]
-        else:
-            prof = "increasing" if "increasing" in cond else "uniform"
-            st = dict(color=PROFILE_COLORS[prof], ls="-" if "shifted" in cond else ":")
-        lab = cond.replace("Ca_LVA", "Ca$_{LVA}$")
-        ax_p.plot(grp.site_um, grp.p_evoked, marker="o", ms=2.5, mew=0, lw=1, label=lab, **st)
-        ax_l.plot(grp.site_um, grp.latency_ms, marker="o", ms=2.5, mew=0, lw=1, **st)
-    ax_p.axhline(0, color=INK_2, lw=0.6)
-    ax_p.set(xlabel="Synapse distance from soma (µm)", ylabel="Evoked spike probability",
-             title=f"Extra spikes within {spec_noise['window_ms']:g} ms of the input", xlim=(0, 405))
-    ax_l.set(xlabel="Synapse distance from soma (µm)", ylabel="Median first-spike latency (ms)",
-             title="Spike timing after the input", xlim=(0, 405))
-    panel_label(ax_p, "c")
-    panel_label(ax_l, "d")
-    h_, l_ = ax_p.get_legend_handles_labels()
+        st = noise_style(cond)
+        ax.plot(grp.site_um, grp.evoked, marker="o", ms=2.5, mew=0, lw=1, label=cond.replace("Ca_LVA", "Ca$_{LVA}$"),
+                **st)
+        ax.fill_between(grp.site_um, grp.ci_lo, grp.ci_hi, color=st["color"], alpha=0.07, lw=0)
+    ax.axhline(0, color=INK_2, lw=0.5)
+    c0, c1 = N["count_window_ms"]
+    ax.set(xlim=(0, 405), xlabel="Synapse distance from soma (µm)", ylabel="Extra spikes per input",
+           title=f"Spikes added by the synapse ({c0:g}–{c1:g} ms)")
+    panel_label(ax, next(letters))
+    ax2 = fig.add_subplot(gs[2, 3:6])
+    site = N["example_site_um"]
+    for cond in example_conditions[:2]:
+        if (cond, site) in psth_data:
+            t, h1, h0 = psth_data[(cond, site)]
+            st = noise_style(cond)
+            ax2.plot(t, _smooth(h1), lw=1, **st)
+            ax2.plot(t, _smooth(h0), lw=0.6, color=st["color"], alpha=0.5, ls="--")
+    ax2.axvline(0, color=INK, lw=0.6, ls=":")
+    ax2.set(xlim=(-50, 150), xlabel="Time from synaptic input (ms)", ylabel="Firing rate (Hz)",
+            title=f"PSTH, synapse at {site:g} µm (dashed: no synapse)")
+    panel_label(ax2, next(letters))
+    h_, l_ = ax.get_legend_handles_labels()
     fig.legend(h_, l_, loc="outside lower center", ncol=3, fontsize=5.5)
     return fig

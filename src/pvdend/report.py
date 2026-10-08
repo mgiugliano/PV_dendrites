@@ -352,32 +352,45 @@ def bias_html(bias: dict, S: dict) -> str:
     return "".join(out)
 
 
-def noise_html(df, examples, S: dict) -> str:
+def noise_html(spikes, examples, S: dict) -> str:
     N = S["noise"]
-    ev = studies.evoked_probability(df)
-    base = df[df.site_um.isna()].groupby("condition", sort=False)
-    rate = (base.n_before.mean() / (N["window_ms"] / 1000)).round(1)
+    ev = studies.evoked_spikes(spikes, N)
+    ps = studies.psth(spikes, N)
     rows = []
     for cond, grp in ev.groupby("condition", sort=False):
-        cells = "".join(f"<td>{_fmt(float(grp[grp.site_um == d].p_evoked.iloc[0]) if (grp.site_um == d).any() else np.nan)}</td>"
-                        for d in N["sites_um"])
-        rows.append(f"<tr><td>{cond.replace('Ca_LVA', 'Ca<sub>LVA</sub>')}</td><td>{rate.get(cond, np.nan):.1f}</td>{cells}</tr>")
+        cells = "".join(
+            (f"<td>{float(g.evoked.iloc[0]):.3f} [{float(g.ci_lo.iloc[0]):.3f}, {float(g.ci_hi.iloc[0]):.3f}]</td>"
+             if len(g := grp[grp.site_um == d]) else "<td>–</td>") for d in N["sites_um"])
+        rows.append(f"<tr><td>{cond.replace('Ca_LVA', 'Ca<sub>LVA</sub>')}</td>{cells}</tr>")
     head = "".join(f"<th>{d:g}</th>" for d in N["sites_um"])
-    table = ("<div class='tablewrap'><table><thead><tr><th rowspan='2'>Condition</th><th rowspan='2'>Background "
-             f"rate (Hz)</th><th colspan='{len(N['sites_um'])}'>Evoked spike probability for a synapse at (µm)</th>"
-             f"</tr><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
-    ex_conds = [c for c in examples if "no Ca" in c] + [c for c in examples if "increasing, shifted" in c]
-    fig = plotting.noise_figure(df, examples, ev, ex_conds[:2], N["example_site_um"], N)
+    n_inputs = int(ev.n_inputs.iloc[0])
+    c0, c1 = N["count_window_ms"]
+    table = ("<div class='tablewrap'><table><thead><tr><th rowspan='2'>Condition</th>"
+             f"<th colspan='{len(N['sites_um'])}'>Extra spikes per input ({c0:g}–{c1:g} ms), mean [95% CI], for a synapse "
+             f"at (µm)</th></tr><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
+    fig = plotting.noise_figure(ps, ev, examples, N)
+    el = studies.early_late(spikes, N).set_index(["condition", "site_um"])
+    site = N["example_site_um"]
+    split = "".join(f"<tr><td>{c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')}</td><td>{el.early[(c, site)]:.3f}</td>"
+                    f"<td>{el.late[(c, site)]:.3f}</td></tr>" for c in dict.fromkeys(ev.condition) if (c, site) in el.index)
+    table += ("<p>The PSTHs show two components: an early one, within about 20 ms of the input, driven by the synaptic "
+              "EPSP, and a later one that the slow dendritic Ca<sub>LVA</sub> depolarisation enlarges. For a synapse at "
+              f"{site:g} µm, extra spikes per input:</p><div class='tablewrap'><table><thead><tr><th>Condition</th>"
+              f"<th>0–20 ms</th><th>20–{N['count_window_ms'][1]:g} ms</th></tr></thead><tbody>{split}</tbody></table></div>")
+    base_rate = np.mean([np.mean([len(x[(x >= -50) & (x < 0)]) for x in spikes[k]]) / 0.05
+                         for k in spikes if k[1] is None])
     return (f"<h2 id='noise'>Firing with a noisy somatic current</h2><p class='meta'>{N['note']} Mean "
             f"{100 * N['mu_frac']:.0f}% and s.d. {100 * N['sigma_frac']:.0f}% of each cell's rheobase, correlation time "
-            f"{N['tau_ms']:g} ms; {N['n_trials']} paired trials per site; evoked probability = P(spike within "
-            f"{N['window_ms']:g} ms of the input | synapse) − P(same window | no synapse); Ca<sub>LVA</sub> "
-            f"{N['g_ca_mS_cm2']:g} mS/cm².</p>" + table
-            + _figure(fig, "<b>Noisy somatic current.</b> <b>a, b</b>, Somatic potential in three trials with the same "
-                           "noise, without (grey) and with (blue) a synapse at "
-                           f"{N['example_site_um']:g} µm; dotted line, synaptic input. <b>c</b>, Spike probability added "
-                           "by the synapse against its distance. <b>d</b>, Median latency of the first spike after the "
-                           "input.", "noise/noise"))
+            f"{N['tau_ms']:g} ms; background firing about {base_rate:.1f} Hz. {n_inputs} synaptic inputs per site "
+            f"({N['n_blocks']} blocks × {N['inputs_per_block']} inputs, one every {N['period_ms']:g} ms); Ca<sub>LVA</sub> "
+            f"{N['g_ca_mS_cm2']:g} mS/cm². Extra spikes = spikes with the synapse − spikes with the same noise and no "
+            "synapse; confidence intervals by bootstrap over inputs.</p>" + table
+            + _figure(fig, "<b>Noisy somatic current.</b> <b>a, b</b>, Somatic potential during two inputs (dotted lines) "
+                           "of the first block, with the same noise, without (grey) and with (blue) the synapse. "
+                           "<b>c–e</b>, PSTH of the spikes added by the synapse (with − without, 2 ms bins, 3-bin moving "
+                           "average) for synapses at 100, 200 and 300 µm. <b>f</b>, Extra spikes per input against "
+                           "synapse distance, mean and 95% CI. <b>g</b>, Firing rate around the input for a synapse at "
+                           f"{N['example_site_um']:g} µm, with (solid) and without (dashed) the synapse.", "noise/noise"))
 
 
 def _threshold_sentence(th) -> str:
@@ -470,13 +483,11 @@ def executive_html(single, train, bias, noise_ev, D, S) -> str:
                      "synapses that fire the cell are at "
                      + ", ".join(f"{_range(v) if v else 'none'} µm ({p})" for p, v in fired.items()) + ".")
     if noise_ev is not None:
-        n_tr = S["noise"]["n_trials"]
-        mid = noise_ev[(noise_ev.site_um >= 150) & (noise_ev.site_um <= 250)].groupby("condition", sort=False).p_evoked.mean()
-        items.append(f"<b>With a noisy somatic current</b> (mean {100 * S['noise']['mu_frac']:.0f}% of rheobase), single "
-                     "synapses add few spikes; for synapses at 150–250 µm the extra spike probability is "
-                     + ", ".join(f"{v:.2f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c, v in mid.items())
-                     + f". Only shifted-activation Ca<sub>LVA</sub> raises it, consistent with the mean depolarisation "
-                       f"inactivating the channel. Preliminary: {n_tr} trials per site, one trial = {1 / n_tr:.2f}.")
+        mid = noise_ev[(noise_ev.site_um >= 150) & (noise_ev.site_um <= 300)].groupby("condition", sort=False).evoked.mean()
+        items.append(f"<b>With a noisy somatic current</b> (mean {100 * S['noise']['mu_frac']:.0f}% of rheobase, "
+                     f"{int(noise_ev.n_inputs.iloc[0])} inputs per site), extra spikes per input for synapses at "
+                     "150–300 µm: " + ", ".join(f"{v:.3f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})"
+                                                for c, v in mid.items()) + ".")
     return ("<section class='exec'><h2 id='summary'>Key results</h2><ol>" + "".join(f"<li>{i}</li>" for i in items)
             + "</ol></section>")
 
@@ -494,7 +505,13 @@ def build(set_file=None, out=None, progress=None, write_html=True) -> Path:
     single = studies.grid("single", S, progress)
     train = studies.grid("train", S, progress)
     bias = studies.bias_grid(S, progress)
-    noise_df, noise_ex = studies.noise_study(S, progress)
+    noise_sp, noise_ex = studies.noise_study(S, progress)
+    noise_ev = studies.evoked_spikes(noise_sp, S["noise"])
+    el = studies.early_late(noise_sp, S["noise"]).set_index(["condition", "site_um"])
+    noise_split = None
+    if ("long, increasing, shifted", 300) in el.index:
+        noise_split = dict(inc="increasing", e0=el.early[("long, no Ca_LVA", 300)], l0=el.late[("long, no Ca_LVA", 300)],
+                           e1=el.early[("long, increasing, shifted", 300)], l1=el.late[("long, increasing, shifted", 300)])
     if progress:
         progress("mechanism analyses")
     D = mechanism.collect(mech_cfg)
@@ -510,9 +527,9 @@ def build(set_file=None, out=None, progress=None, write_html=True) -> Path:
         ("mechanism", "Mechanism", mechanism_html(D)),
         ("train", "Trains", train_html(train)),
         ("bias", "Firing with a steady somatic current", bias_html(bias, S)),
-        ("noise", "Firing with a noisy somatic current", noise_html(noise_df, noise_ex, S)),
+        ("noise", "Firing with a noisy somatic current", noise_html(noise_sp, noise_ex, S)),
         ("manuscript", "Draft manuscript material",
-         manuscript.html(single, train, bias, studies.evoked_probability(noise_df), D, cells, cfg, S)),
+         manuscript.html(single, train, bias, noise_ev, D, cells, cfg, S, noise_split)),
     ]
     toc = "".join(f"<li><a href='#{a}'>{t}</a></li>" for a, t, _ in sections)
     page = f"""<!doctype html>
@@ -522,7 +539,7 @@ def build(set_file=None, out=None, progress=None, write_html=True) -> Path:
 <h1>Short (100 µm) vs grown (400 µm) dendrite of a human PV+ interneuron</h1>
 <p class="meta">Generated {dt.datetime.now():%Y-%m-%d %H:%M} · pvdend {__version__} · NEURON {neuron.__version__}
 · studies <code>configs/studies.json</code></p>
-{executive_html(single, train, bias, studies.evoked_probability(noise_df), D, S)}
+{executive_html(single, train, bias, noise_ev, D, S)}
 <nav><ol>{toc}</ol></nav>
 {''.join(body for _, _, body in sections)}
 <p class="ai">{AI_STATEMENT}</p>

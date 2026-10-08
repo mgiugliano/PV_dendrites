@@ -1,23 +1,46 @@
 {
   "base": "default.json",
   "factors": {
-    "ca_act_shift_mV": [0.0, -15.0],
-    "g_ca_mS_cm2": [1.0, 2.5],
-    "profiles": ["uniform", "increasing"],
-    "mouth_scale": [1.0, 1.5]
+    "ca_act_shift_mV": [
+      0.0,
+      -15.0
+    ],
+    "g_ca_mS_cm2": [
+      1.0,
+      2.5
+    ],
+    "profiles": [
+      "uniform",
+      "increasing"
+    ],
+    "mouth_scale": [
+      1.0,
+      1.5
+    ]
   },
   "single": {
     "overrides": {},
     "note": "One synaptic event (Exp2Syn, 5 nS) at each site, every 10 um."
   },
   "train": {
-    "overrides": {"n_events": 5, "freq_hz": 50.0},
-    "mouth_scale": [1.0],
+    "overrides": {
+      "n_events": 5,
+      "freq_hz": 50.0
+    },
+    "mouth_scale": [
+      1.0
+    ],
     "note": "Five synaptic events at 50 Hz."
   },
   "bias": {
-    "fractions": [0.0, 0.5, 0.95],
-    "g_ca_mS_cm2": [2.5],
+    "fractions": [
+      0.0,
+      0.5,
+      0.95
+    ],
+    "g_ca_mS_cm2": [
+      2.5
+    ],
     "mouth_scale": 1.0,
     "example_site_um": 300.0,
     "note": "Steady somatic current as a fraction of each cell's rheobase, applied throughout the simulation; the cell is free to fire."
@@ -26,13 +49,33 @@
     "mu_frac": 0.8,
     "sigma_frac": 0.4,
     "tau_ms": 3.0,
-    "n_trials": 30,
-    "sites_um": [50, 100, 150, 200, 250, 300, 350, 400],
-    "warmup_ms": 150.0,
-    "window_ms": 40.0,
+    "sites_um": [
+      50,
+      100,
+      150,
+      200,
+      250,
+      300,
+      350,
+      400
+    ],
+    "warmup_ms": 200.0,
+    "period_ms": 250.0,
+    "inputs_per_block": 20,
+    "n_blocks": 15,
+    "psth_window_ms": [
+      -50.0,
+      150.0
+    ],
+    "psth_bin_ms": 2.0,
+    "count_window_ms": [
+      0.0,
+      60.0
+    ],
+    "workers": 10,
     "g_ca_mS_cm2": 2.5,
     "example_site_um": 300.0,
-    "note": "Somatic current = mean (fraction of rheobase) + Ornstein-Uhlenbeck noise; paired trials with and without the synapse share the same noise."
+    "note": "Somatic current = mean (fraction of rheobase) + Ornstein-Uhlenbeck noise. Each block is one long simulation with a synaptic input every period_ms; the same noise is simulated without the synapse, so the difference isolates the spikes added by the synapse."
   },
   "mechanism": {
     "ca_act_shift_mV": -15.0,

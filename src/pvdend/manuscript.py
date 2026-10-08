@@ -222,11 +222,14 @@ bisection (to 2 pA). First, a steady current of {', '.join(f'{100 * f:.0f}' for 
 of rheobase, applied throughout the simulation including the initialisation, so that each run started from the new
 steady state. Second, a fluctuating current with mean {100 * S['noise']['mu_frac']:.0f}% of rheobase and an
 Ornstein–Uhlenbeck component of standard deviation {100 * S['noise']['sigma_frac']:.0f}% of rheobase and
-correlation time {S['noise']['tau_ms']:g} ms, which made the cell fire irregularly at a few Hz. For each synapse
-position we ran {S['noise']['n_trials']} trials with the synapse activated {S['noise']['warmup_ms']:g} ms after the
-start, and the same {S['noise']['n_trials']} noise realisations without the synapse; the evoked spike probability is
-the difference between the fractions of trials with at least one spike in the {S['noise']['window_ms']:g} ms after
-the input.</p>
+correlation time {S['noise']['tau_ms']:g} ms, which made the cell fire irregularly at a few Hz. For efficiency, each
+simulation (block) delivered {S['noise']['inputs_per_block']} synaptic inputs, one every {S['noise']['period_ms']:g} ms after
+a {S['noise']['warmup_ms']:g} ms warm-up, and we ran {S['noise']['n_blocks']} blocks with different noise per synapse
+position ({S['noise']['n_blocks'] * S['noise']['inputs_per_block']} inputs), in parallel on separate processor cores.
+For each block, we simulated the same noise without the synapse, so that the difference between the two spike trains
+isolates the spikes added by the synapse. From the spike times we computed peri-stimulus time histograms (PSTHs,
+{S['noise']['psth_bin_ms']:g} ms bins) and the number of extra spikes per input in the {S['noise']['count_window_ms'][0]:g}–{S['noise']['count_window_ms'][1]:g}
+ms after it, with 95% confidence intervals from 1000 bootstrap resamples of the inputs.</p>
 
 <h3>Synaptic input</h3>
 <p>We modelled an excitatory synapse as a conductance with a double-exponential time course (NEURON
@@ -346,7 +349,7 @@ def _rest_firing(single, train) -> str:
             else f"At rest, single synapses or trains evoked {n} somatic spikes in total.")
 
 
-def results_html(single, train, bias, noise_ev, D, cells, cfg, S) -> str:
+def results_html(single, train, bias, noise_ev, D, cells, cfg, S, noise_split=None) -> str:
     n = single[(0.0, 1.0, 1.0)]["none"]
     short, long = cells["short"], cells["long"]
     zl, zs = D["impedance"]["long"], D["impedance"]["short"]
@@ -456,15 +459,20 @@ at the tip (Fig. 4e), while its peak levelled off as the membrane approached the
                     f"{bm:.2f}-fold at {100 * mid:.0f}% of rheobase"
                     + (", consistent with depolarisation inactivating Ca<sub>LVA</sub>." if bm < b0 - 0.05 else "."))
     if noise_ev is not None and len(noise_ev):
-        far = noise_ev[(noise_ev.site_um >= 150) & (noise_ev.site_um <= 250)].groupby("condition", sort=False).p_evoked.mean()
-        near = noise_ev[noise_ev.site_um <= 100].groupby("condition", sort=False).p_evoked.mean()
-        out += (" Finally, with a fluctuating somatic current that made the cell fire irregularly (Fig. 5), the "
-                "extra spike probability added by a synapse at 50–100 µm was "
-                + ", ".join(f"{near[c]:.2f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c in near.index)
-                + ", and at 150–250 µm "
-                + ", ".join(f"{far[c]:.2f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c in far.index)
-                + f"; with {S['noise']['n_trials']} trials per site (one trial = {1 / S['noise']['n_trials']:.2f}) "
-                  "these estimates are preliminary.")
+        far = noise_ev[(noise_ev.site_um >= 150) & (noise_ev.site_um <= 300)].groupby("condition", sort=False).evoked.mean()
+        near = noise_ev[noise_ev.site_um <= 100].groupby("condition", sort=False).evoked.mean()
+        n_in = int(noise_ev.n_inputs.iloc[0])
+        out += (" Finally, with a fluctuating somatic current that made the cell fire irregularly (Fig. 5), each "
+                f"synapse added a small number of spikes, mostly within a few tens of milliseconds ({n_in} inputs per "
+                "site). Synapses at 50–100 µm added "
+                + ", ".join(f"{near[c]:.3f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c in near.index)
+                + " extra spikes per input, and synapses at 150–300 µm "
+                + ", ".join(f"{far[c]:.3f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c in far.index) + "."
+                + (f" For a synapse at 300 µm, shifted-activation Ca<sub>LVA</sub> ({noise_split['inc']}) increased the "
+                   f"extra spikes both within 20 ms of the input ({noise_split['e0']:.3f} → {noise_split['e1']:.3f}) and "
+                   f"in the following 20–60 ms ({noise_split['l0']:.3f} → {noise_split['l1']:.3f}), consistent with the slow "
+                   "dendritic depolarisation prolonging the time window in which the synapse can fire the cell."
+                   if noise_split else ""))
     out += "</p>"
     out += """
 <p class="meta">A limit of these simulations is that the dendritic Ca<sub>LVA</sub> borrows the kinetics of the
@@ -516,12 +524,16 @@ def legends_html(single, D, cells, cfg, S) -> str:
          f"{', '.join(f'{t:g}' for t in mechanism.TAU2_VALUES)} ms. <b>h</b>, Local potential with and without "
          f"Ca<sub>LVA</sub> for a synapse at {D['example_site']:g} µm. <b>i</b>, Ca<sub>LVA</sub> gates at the same site."),
         ("Figure 5", "figures/noise/noise.pdf",
-         "Distal synapses and firing with a noisy somatic current.",
+         "Spikes added by single synapses in a cell firing irregularly.",
          f"The soma receives a mean current of {100 * N['mu_frac']:.0f}% of rheobase plus Ornstein–Uhlenbeck noise "
-         f"(s.d. {100 * N['sigma_frac']:.0f}% of rheobase, {N['tau_ms']:g} ms). <b>a, b</b>, Somatic potential in three "
-         f"trials with the same noise without (grey) and with (blue) a synapse at {N['example_site_um']:g} µm. <b>c</b>, "
-         f"Spike probability added by the synapse within {N['window_ms']:g} ms, against its distance ({N['n_trials']} "
-         "paired trials per site). <b>d</b>, Median latency of the first spike."),
+         f"(s.d. {100 * N['sigma_frac']:.0f}% of rheobase, {N['tau_ms']:g} ms). <b>a, b</b>, Somatic potential during two "
+         f"synaptic inputs (dotted lines), with the same noise, without (grey) and with (blue) a synapse at "
+         f"{N['example_site_um']:g} µm. <b>c–e</b>, PSTH of the spikes added by the synapse (with − without, "
+         f"{N['psth_bin_ms']:g} ms bins, 3-bin moving average) for synapses at 100, 200 and 300 µm. <b>f</b>, Extra spikes "
+         f"per input against synapse distance (mean and bootstrap 95% CI; {N['n_blocks'] * N['inputs_per_block']} inputs "
+         f"per site). <b>g</b>, Firing rate around the input for a synapse at {N['example_site_um']:g} µm with (solid) and "
+         "without (dashed) the synapse. Colours: short (dashed grey), long without Ca<sub>LVA</sub> (black), uniform "
+         "(blue) and increasing (green) Ca<sub>LVA</sub> with original (dotted) or shifted (solid) activation."),
         ("Supplementary Figure S1", "figures/morphology/diameter.pdf", "Geometry of the target dendrite.",
          "<b>a</b>, Diameter along the target dendrite in the short, long and wide-mouth morphologies; grey, every other "
          "soma-to-tip path. <b>b</b>, Cumulative membrane area; dotted line, soma."),
@@ -543,13 +555,13 @@ def _minus(text: str) -> str:
     return re.sub(r"(?<![\w.\-/])-(\d)", "\u2212\\1", text)
 
 
-def html(single, train, bias, noise_ev, D, cells, cfg, S) -> str:
+def html(single, train, bias, noise_ev, D, cells, cfg, S, noise_split=None) -> str:
     return _minus(f"""
 <h2 id="manuscript">Draft manuscript material</h2>
 <p class="meta">Draft text for a manuscript, written from the simulations in this report; every number is filled in
 from the data when the report is built. Figure numbers refer to the proposed figure set listed under
 <i>Figure legends</i>; reference numbers refer to the list at the end. To be edited by the authors.</p>
 <h2 id="ms-methods">Methods</h2>{methods_html(cells, cfg, D['rest_mV'], S, D['cfg'])}
-<h2 id="ms-results">Results</h2>{results_html(single, train, bias, noise_ev, D, cells, cfg, S)}
+<h2 id="ms-results">Results</h2>{results_html(single, train, bias, noise_ev, D, cells, cfg, S, noise_split)}
 <h2 id="ms-legends">Figure legends</h2>{legends_html(single, D, cells, cfg, S)}
 {references_html()}""")

@@ -98,64 +98,128 @@ def noise_conditions(S=None) -> list:
     return conds
 
 
-def noise_study(S=None, progress=None) -> tuple[pd.DataFrame, dict]:
-    """Paired noisy-current trials. Returns (spike table, example traces); cached in results/noise/."""
+def _noise_block(job):
+    """Worker: one long noisy simulation (one block); returns spike times. Runs in a separate process."""
+    label, morph, cfg_json, site, block, N = job
+    from .config import Config as _C
+    cfg = _C.from_dict(json.loads(cfg_json))
+    cell = get_cell(morph, cfg)
+    calcium.configure(cell, cfg)
+    rb = rheobase_nA(morph, cfg)
+    on, k, period = N["warmup_ms"], N["inputs_per_block"], N["period_ms"]
+    c = cfg.replace(n_events=k, freq_hz=1000.0 / period)
+    keep = block == 0 and site in (None, N["example_site_um"])
+    r = run_noise_trial(cell, c, site, 1000 + block, N["mu_frac"] * rb, N["sigma_frac"] * rb, N["tau_ms"],
+                        on, on + k * period, keep)
+    out = dict(label=label, morph=morph, site=site, block=block, spikes=r["spikes"])
+    if keep:  # first two inputs only
+        sel = r["t"] < on + 2 * period
+        out.update(t=r["t"][sel], v=r["v_soma"][sel])
+    return out
+
+
+def noise_study(S=None, progress=None):
+    """Paired noisy-current blocks, run in parallel; cached in results/noise_psth/.
+
+    Returns (spikes, examples): spikes[(label, site)] = list of spike-time arrays relative to each input
+    (site None = no synapse, same noise); examples[label] = traces of the first block.
+    """
+    import concurrent.futures as cf
+    import multiprocessing as mp
     S = S or spec()
     N = S["noise"]
-    folder = RESULTS_DIR / "noise"
+    folder = RESULTS_DIR / "noise_psth"
     folder.mkdir(parents=True, exist_ok=True)
     key = json.dumps(N, sort_keys=True)
-    rows, examples = [], {}
+    jobs, cached = [], {}
     for label, morph, cfg in noise_conditions(S):
-        stem = f"{cfg.name}_{morph}"
-        path = folder / f"{stem}.csv"
-        ex_path = folder / f"{stem}_example.npz"
-        meta = folder / f"{stem}.json"
-        if path.exists() and meta.exists() and meta.read_text() == key + cfg.to_json():
-            df = pd.read_csv(path)
-            with np.load(ex_path) as z:
-                examples[label] = {k: z[k] for k in z.files}
-        else:
-            cell = get_cell(morph, cfg)
-            calcium.configure(cell, cfg)
-            rb = rheobase_nA(morph, cfg)
-            mu, sigma = N["mu_frac"] * rb, N["sigma_frac"] * rb
-            on, tstop = N["warmup_ms"], N["warmup_ms"] + N["window_ms"] + 20
-            recs = []
-            sites = [None] + [d for d in N["sites_um"] if d <= cell.tip_distance + 1e-3]
-            for d in sites:
+        cell_tip = get_cell(morph, cfg).tip_distance
+        for site in [None] + [d for d in N["sites_um"] if d <= cell_tip + 1e-3]:
+            stem = f"{cfg.name}_{morph}_{'nosyn' if site is None else f'{site:g}'}"
+            path, meta = folder / f"{stem}.npz", folder / f"{stem}.json"
+            if path.exists() and meta.exists() and meta.read_text() == key + cfg.to_json():
+                cached[(label, site)] = path
+            else:
+                jobs += [(label, morph, cfg.to_json(), site, b, N) for b in range(N["n_blocks"])]
+                cached[(label, site)] = (path, meta, key + cfg.to_json())
+    results = {}
+    if jobs:
+        ctx = mp.get_context("spawn")
+        with cf.ProcessPoolExecutor(max_workers=N["workers"], mp_context=ctx) as ex:
+            for i, res in enumerate(ex.map(_noise_block, jobs, chunksize=1)):
+                results.setdefault((res["label"], res["site"]), []).append(res)
                 if progress:
-                    progress(f"{cfg.name}: {'no synapse' if d is None else f'{d:g} um'}")
-                for trial in range(N["n_trials"]):
-                    keep = d == N["example_site_um"] and trial < 5 or (d is None and trial < 5)
-                    r = run_noise_trial(cell, cfg, d, 1000 + trial, mu, sigma, N["tau_ms"], on, tstop, keep)
-                    sp = r["spikes"]
-                    recs.append(dict(site_um=np.nan if d is None else d, trial=trial,
-                                     n_window=int(np.sum((sp >= on) & (sp < on + N["window_ms"]))),
-                                     n_before=int(np.sum((sp >= on - N["window_ms"]) & (sp < on))),
-                                     first_ms=float(sp[sp >= on][0] - on) if np.any(sp >= on) else np.nan,
-                                     mu_nA=mu, sigma_nA=sigma))
-                    if keep:
-                        tag = "nosyn" if d is None else "syn"
-                        examples.setdefault(label, {})[f"{tag}_{trial}_t"] = r["t"]
-                        examples[label][f"{tag}_{trial}_v"] = r["v_soma"]
-            df = pd.DataFrame(recs)
-            df.to_csv(path, index=False)
-            np.savez_compressed(ex_path, **examples[label])
-            meta.write_text(key + cfg.to_json())
-        df = df.assign(condition=label, morphology=morph)
-        rows.append(df)
-    return pd.concat(rows, ignore_index=True), examples
+                    progress(f"noise block {i + 1}/{len(jobs)}")
+    spikes, examples = {}, {}
+    on, k, period = N["warmup_ms"], N["inputs_per_block"], N["period_ms"]
+    w0, w1 = N["psth_window_ms"]
+    for (label, site), where in cached.items():
+        if isinstance(where, tuple):  # just simulated: save
+            path, meta, stamp = where
+            blocks = sorted(results[(label, site)], key=lambda r: r["block"])
+            arrays = {f"b{r['block']}": r["spikes"] for r in blocks}
+            for r in blocks:
+                if "t" in r:
+                    arrays["ex_t"], arrays["ex_v"] = r["t"], r["v"]
+            np.savez_compressed(path, **arrays)
+            meta.write_text(stamp)
+        else:
+            path = where
+        with np.load(path) as z:
+            rel = []
+            for b in range(N["n_blocks"]):
+                sp = z[f"b{b}"]
+                for i in range(k):
+                    t0 = on + i * period
+                    rel.append(sp[(sp >= t0 + w0) & (sp < t0 + w1)] - t0)
+            spikes[(label, site)] = rel
+            if "ex_t" in z.files:
+                examples.setdefault(label, {})["nosyn" if site is None else "syn"] = (z["ex_t"] - on, z["ex_v"])
+    return spikes, examples
 
 
-def evoked_probability(df: pd.DataFrame) -> pd.DataFrame:
-    """Per condition and site: P(spike in window) with the synapse minus without (same noise seeds)."""
-    out = []
-    for cond, grp in df.groupby("condition", sort=False):
-        base = grp[grp.site_um.isna()].set_index("trial").n_window > 0
-        for d, g in grp[grp.site_um.notna()].groupby("site_um"):
-            p = (g.set_index("trial").n_window > 0)
-            out.append(dict(condition=cond, site_um=d, p_syn=p.mean(), p_base=base.mean(),
-                            p_evoked=(p.astype(int) - base.reindex(p.index).astype(int)).mean(),
-                            latency_ms=g.first_ms.median()))
-    return pd.DataFrame(out)
+def psth(spikes: dict, N: dict) -> dict:
+    """{(label, site): (bin_centres, rate_with_Hz, rate_without_Hz)} for each condition and synapse site."""
+    w0, w1 = N["psth_window_ms"]
+    edges = np.arange(w0, w1 + 1e-9, N["psth_bin_ms"])
+    out = {}
+    for (label, site), rel in spikes.items():
+        if site is None:
+            continue
+        base = spikes[(label, None)]
+        h1 = np.histogram(np.concatenate(rel), edges)[0] / len(rel) / (N["psth_bin_ms"] / 1000)
+        h0 = np.histogram(np.concatenate(base), edges)[0] / len(base) / (N["psth_bin_ms"] / 1000)
+        out[(label, site)] = ((edges[:-1] + edges[1:]) / 2, h1, h0)
+    return out
+
+
+def evoked_spikes(spikes: dict, N: dict) -> pd.DataFrame:
+    """Extra spikes per input in the count window (paired difference) with bootstrap 95% CI, per condition and site."""
+    c0, c1 = N["count_window_ms"]
+    rng = np.random.default_rng(0)
+    rows = []
+    for (label, site), rel in spikes.items():
+        if site is None:
+            continue
+        base = spikes[(label, None)]
+        d = np.array([np.sum((a >= c0) & (a < c1)) - np.sum((b >= c0) & (b < c1)) for a, b in zip(rel, base)])
+        boot = [rng.choice(d, d.size).mean() for _ in range(1000)]
+        rows.append(dict(condition=label, site_um=site, evoked=d.mean(), ci_lo=np.percentile(boot, 2.5),
+                         ci_hi=np.percentile(boot, 97.5), n_inputs=d.size,
+                         p_base=np.mean([np.any((b >= c0) & (b < c1)) for b in base])))
+    return pd.DataFrame(rows)
+
+
+def early_late(spikes: dict, N: dict, split_ms=20.0) -> pd.DataFrame:
+    """Extra spikes per input before and after `split_ms` (within the count window), per condition and site."""
+    c0, c1 = N["count_window_ms"]
+    rows = []
+    for (label, site), rel in spikes.items():
+        if site is None:
+            continue
+        base = spikes[(label, None)]
+        cnt = lambda arrs, a, b: np.mean([np.sum((x >= a) & (x < b)) for x in arrs])  # noqa: E731
+        rows.append(dict(condition=label, site_um=site,
+                         early=cnt(rel, c0, split_ms) - cnt(base, c0, split_ms),
+                         late=cnt(rel, split_ms, c1) - cnt(base, split_ms, c1)))
+    return pd.DataFrame(rows)
