@@ -560,3 +560,50 @@ def dendrogram_figure(cells: dict, gbar=None, gmax=None):
     for ax in axes[:-1]:
         ax.set_xlabel("")
     return fig
+
+
+def diameter_figure(cells: dict):
+    """Diameter and cumulative membrane area along the target dendrite (short vs long)."""
+    from .morphology import leaves, path_to_soma
+    set_style()
+    fig, axes = plt.subplots(1, 2, figsize=(TWO_COL, 62 * MM), layout="constrained")
+    ref = cells.get("long") or next(iter(cells.values()))
+
+    def profile(cell, path):  # reconstruction points: (path distance, diameter)
+        d, dia = [], []
+        for sec in path:
+            d0 = cell.distance(sec(0))
+            d += [d0 + sec.arc3d(i) for i in range(sec.n3d())]
+            dia += [sec.diam3d(i) for i in range(sec.n3d())]
+        return d, dia
+
+    for leaf in leaves(ref):  # every other soma-to-tip path, for context
+        if leaf == ref.target_path[-1]:
+            continue
+        axes[0].plot(*profile(ref, path_to_soma(ref, leaf)), color="#cfcec9", lw=0.5, zorder=1)
+    axes[0].plot([], [], color="#cfcec9", lw=0.5, label="other soma-to-tip paths")
+    for m in ("long", "short"):
+        if m not in cells:
+            continue
+        c, st = cells[m], MORPH_STYLE[m]
+        segs = c.path_segments()
+        axes[0].plot(*profile(c, c.target_path), color=st["color"], ls=st["ls"],
+                     lw=1.4, label=f"target, {st['label']}", zorder=3)
+        area = np.cumsum([s.area() for s, _ in segs])
+        axes[1].plot([d for _, d in segs], area, color=st["color"], ls=st["ls"], lw=1.4, label=st["label"])
+    soma_area = sum(s.area() for s in ref.soma[0])
+    axes[1].axhline(soma_area, color=INK_2, lw=0.6, ls=":")
+    axes[1].text(5, soma_area * 1.03, f"soma membrane ({soma_area:.0f} µm²)", fontsize=6, color=INK_2, va="bottom")
+    if "short" in cells:
+        for ax in axes:
+            ax.axvline(cells["short"].tip_distance, color=INK_2, lw=0.6, ls=":")
+        axes[0].text(cells["short"].tip_distance + 4, 0.05, "original tip", fontsize=6, color=INK_2)
+    axes[0].set(xlabel="Path distance from soma (µm)", ylabel="Diameter (µm)", ylim=(0, None),
+                title="Diameter along the target dendrite", xlim=(0, None))
+    axes[1].set(xlabel="Path distance from soma (µm)", ylabel="Cumulative membrane area (µm²)",
+                title="Membrane area of the target dendrite", xlim=(0, 405), ylim=(0, None))
+    axes[0].legend(loc="upper right")
+    axes[1].legend(loc="center right")
+    panel_label(axes[0], "a")
+    panel_label(axes[1], "b")
+    return fig

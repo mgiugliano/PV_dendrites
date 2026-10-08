@@ -162,3 +162,35 @@ def grow_swc(in_path, out_path, tip_id: int, extra_um: float,
         f.writelines(lines)
         f.writelines(new_lines)
     return pos
+
+
+def path_geometry(cell, reference=None) -> list[dict]:
+    """One row per section of the target path: position, length, diameters, membrane area.
+
+    `reference` (another cell, e.g. the short one) is used to label sections that
+    exist only in `cell` as the grown extension.
+    """
+    ref_names = {s.name().split(".")[-1] for s in reference.target_path} if reference else None
+    ref_tip = reference.target_path[-1].name().split(".")[-1] if reference else None
+    path = cell.target_path
+    rows = []
+    for i, sec in enumerate(path):
+        name = sec.name().split(".")[-1]
+        side = [c.name().split(".")[-1] for c in children(sec) if c not in set(path)]
+        if ref_names is not None and name not in ref_names:
+            portion = "grown extension"
+        elif i == len(path) - 1:
+            portion = "terminal branch, to the tip"
+        elif name == ref_tip:
+            portion = "terminal branch, to the original tip"
+        elif side:
+            portion = f"to branch point ({', '.join(side)} leaves)"
+        else:
+            portion = "unbranched"
+        d3 = [sec.diam3d(k) for k in range(sec.n3d())]
+        rows.append(dict(section=name, portion=portion,
+                         start_um=soma_distance(cell, sec(0)), end_um=soma_distance(cell, sec(1)),
+                         length_um=sec.L, diam_mean_um=float(np.mean([s.diam for s in sec])),
+                         diam_min_um=min(d3), diam_max_um=max(d3),
+                         area_um2=sum(s.area() for s in sec), nseg=sec.nseg))
+    return rows

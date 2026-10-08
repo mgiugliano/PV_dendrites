@@ -19,7 +19,7 @@ import numpy as np
 from . import __version__, mechanism, plotting, viewer3d
 from ._paths import CONFIG_DIR, FIGURES_DIR
 from .config import Config
-from .morphology import load_target_meta
+from .morphology import load_target_meta, path_geometry
 from .protocols import get_cell, load_or_run
 
 TABLE_SITES = (10, 100, 200, 300, 400)
@@ -301,6 +301,49 @@ fast activation (m²), slow inactivation (h), and their product, the open probab
 </figcaption></figure>"""
 
 
+def geometry_html(cells: dict) -> str:
+    """Table and figure: diameter, length and membrane area of each portion of the target dendrite."""
+    short, long = cells["short"], cells["long"]
+    rows_l = path_geometry(long, reference=short)
+    in_short = {r["section"] for r in path_geometry(short)}
+    tr = []
+    for r in rows_l:
+        rng = (f"{r['diam_mean_um']:.2f}" if r["diam_max_um"] - r["diam_min_um"] < 0.005 else
+               f"{r['diam_mean_um']:.2f} ({r['diam_min_um']:.2f}–{r['diam_max_um']:.2f})")
+        tr.append(f"<tr><td>{r['section']}</td><td style='text-align:left'>{r['portion']}</td>"
+                  f"<td>{r['start_um']:.1f}–{r['end_um']:.1f}</td><td>{r['length_um']:.1f}</td><td>{rng}</td>"
+                  f"<td>{r['area_um2']:.0f}</td><td>{'✓' if r['section'] in in_short else '–'}</td><td>✓</td></tr>")
+    a_s = sum(r["area_um2"] for r in path_geometry(short))
+    a_l = sum(r["area_um2"] for r in rows_l)
+    soma = short.soma[0]
+    a_soma = sum(x.area() for x in soma)
+    a_basal = sum(x.area() for sec in short.basal for x in sec)
+    grown = [r for r in rows_l if r["portion"] == "grown extension"]
+    table = ("<div class='tablewrap'><table><thead><tr><th>Section</th><th style='text-align:left'>Portion</th>"
+             "<th>Path distance (µm)</th><th>Length (µm)</th><th>Diameter (µm), mean (range)</th>"
+             "<th>Membrane area (µm²)</th><th>short</th><th>long</th></tr></thead><tbody>"
+             + "".join(tr) +
+             f"<tr><td><b>total</b></td><td></td><td></td><td>{short.tip_distance:.1f} / {long.tip_distance:.1f}</td>"
+             f"<td></td><td>{a_s:.0f} / {a_l:.0f}</td><td></td><td></td></tr></tbody></table></div>")
+    text = (f"<p>All portions of the target dendrite are thin. The first section tapers from "
+            f"{rows_l[0]['diam_max_um']:.2f} µm at the soma to {rows_l[0]['diam_min_um']:.2f} µm at the first branch "
+            f"point; from {rows_l[1]['end_um']:.0f} µm onwards the diameter is {rows_l[2]['diam_min_um']:.2f}–"
+            f"{rows_l[2]['diam_max_um']:.2f} µm. The grown extension keeps the tip diameter "
+            f"({grown[0]['diam_mean_um']:.2f} µm) over its {grown[0]['length_um']:.1f} µm, so the long dendrite is a "
+            f"uniform thin cable beyond the original tip. Growing the dendrite adds {a_l - a_s:.0f} µm² of membrane: the "
+            f"target dendrite goes from {a_s:.0f} to {a_l:.0f} µm², compared with {a_soma:.0f} µm² for the soma "
+            f"({soma.diam:.1f} µm diameter) and {a_basal:.0f} µm² for the whole basal tree of the short cell. "
+            "Section boundaries are the branch points of the reconstruction; NEURON's import creates a new section "
+            "for the grown part, which is otherwise a direct continuation of the original tip.</p>")
+    fig = (f"<figure>{_svg(plotting.diameter_figure(cells))}<figcaption><b>Target dendrite geometry.</b> "
+           "<b>a</b>, Diameter along the target dendrite (reconstruction points) in the short (dashed) and long "
+           "(solid) cells, with every other soma-to-tip path of the cell in grey. Many other branches taper "
+           "gradually over hundreds of micrometres; the target dendrite reaches its final diameter within the first "
+           f"{rows_l[1]['end_um']:.0f} µm. Dotted line: original tip. <b>b</b>, Cumulative membrane area of the target "
+           "dendrite from the soma outwards; dotted line: soma membrane area.</figcaption></figure>")
+    return "<h3 id='geometry'>Diameters and membrane area of the target dendrite</h3>" + table + text + fig
+
+
 def methods_html(cfg: Config) -> str:
     meta = load_target_meta()
     s, l = meta["short"], meta["long"]
@@ -342,6 +385,11 @@ def build(set_file=None, out=None, progress=None) -> Path:
                 "branches are identical; note that the longest original branch of the cell reaches "
                 f"{max(cells['short'].distance(s(1)) for s in cells['short'].dend):.0f} µm."
                 "</figcaption></figure>")
+    body.append(geometry_html(cells))
+    for stem, fig in (("dendrogram", plotting.dendrogram_figure(cells)),
+                      ("diameter", plotting.diameter_figure(cells))):
+        plotting.save_figure(fig, f"morphology/{stem}", formats=("pdf", "png"))
+        plt.close(fig)
     fig3d = viewer3d.morphology_3d(cells["long"], cells["short"].tip_distance)
     body.append("<figure>" + fig3d.to_html(full_html=False, include_plotlyjs=True,
                                             config={"displaylogo": False})
