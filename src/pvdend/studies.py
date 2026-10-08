@@ -223,3 +223,64 @@ def early_late(spikes: dict, N: dict, split_ms=20.0) -> pd.DataFrame:
                          early=cnt(rel, c0, split_ms) - cnt(base, c0, split_ms),
                          late=cnt(rel, split_ms, c1) - cnt(base, split_ms, c1)))
     return pd.DataFrame(rows)
+
+
+EXAMPLE_PAIR = ("long, no Ca_LVA", "long, increasing, shifted")
+
+
+def find_contrast_inputs(spikes: dict, N: dict, site, pair=EXAMPLE_PAIR):
+    """Inputs at `site` where, with the same noise seed, only the Ca_LVA condition fires after the input.
+
+    Returns a list of (block, input index, spike latency in ms).
+    """
+    k = N["inputs_per_block"]
+    a, b = pair
+    has = lambda x, t0, t1: bool(np.any((x >= t0) & (x < t1)))  # noqa: E731
+    out = []
+    for j in range(len(spikes[(b, site)])):
+        sb = spikes[(b, site)][j]
+        if (not has(spikes[(a, None)][j], -30, 60) and not has(spikes[(b, None)][j], -30, 60)
+                and not has(spikes[(a, site)][j], -30, 60) and has(sb, 5, 50) and not has(sb, -30, 5)):
+            out.append((j // k, j % k, float(sb[sb >= 5][0])))
+    return out
+
+
+def contrast_example(spikes: dict, S=None, pair=EXAMPLE_PAIR) -> dict:
+    """Re-simulate one representative contrasting input with voltage traces (cached).
+
+    Returns {"block", "input", "n_found", "n_inputs", label: {"syn": (t, v), "nosyn": (t, v)}}.
+    """
+    S = S or spec()
+    N = S["noise"]
+    site = N["example_site_um"]
+    found = find_contrast_inputs(spikes, N, site, pair)
+    if not found:
+        return {}
+    block, inp, _ = next((f for f in found if 15 <= f[2] <= 35), found[0])  # first with a typical latency
+    path = RESULTS_DIR / "noise_psth" / f"contrast_b{block}_i{inp}_{site:g}.npz"
+    conds = {label: (morph, cfg) for label, morph, cfg in noise_conditions(S)}
+    out = dict(block=block, input=inp, n_found=len(found), n_inputs=len(spikes[(pair[0], site)]), site=site)
+    if path.exists():
+        with np.load(path) as z:
+            for label in pair:
+                out[label] = {tag: (z[f"{label}|{tag}|t"], z[f"{label}|{tag}|v"]) for tag in ("syn", "nosyn")}
+        return out
+    on, period = N["warmup_ms"], N["period_ms"]
+    t_in = on + inp * period
+    arrays = {}
+    for label in pair:
+        morph, cfg = conds[label]
+        cell = get_cell(morph, cfg)
+        calcium.configure(cell, cfg)
+        rb = rheobase_nA(morph, cfg)
+        c = cfg.replace(n_events=inp + 1, freq_hz=1000.0 / period)
+        out[label] = {}
+        for tag, s in (("syn", site), ("nosyn", None)):
+            r = run_noise_trial(cell, c, s, 1000 + block, N["mu_frac"] * rb, N["sigma_frac"] * rb, N["tau_ms"],
+                                on, t_in + 150, keep_trace=True)
+            sel = r["t"] >= t_in - 100
+            tt, vv = r["t"][sel] - t_in, r["v_soma"][sel]
+            out[label][tag] = (tt, vv)
+            arrays[f"{label}|{tag}|t"], arrays[f"{label}|{tag}|v"] = tt, vv
+    np.savez_compressed(path, **arrays)
+    return out

@@ -368,7 +368,9 @@ def noise_html(spikes, examples, S: dict) -> str:
     table = ("<div class='tablewrap'><table><thead><tr><th rowspan='2'>Condition</th>"
              f"<th colspan='{len(N['sites_um'])}'>Extra spikes per input ({c0:g}–{c1:g} ms), mean [95% CI], for a synapse "
              f"at (µm)</th></tr><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
-    fig = plotting.noise_figure(ps, ev, examples, N)
+    contrast = studies.contrast_example(spikes, S)
+    fig = plotting.noise_figure(ps, ev, {**examples, "contrast": contrast}, N,
+                                example_conditions=list(studies.EXAMPLE_PAIR))
     el = studies.early_late(spikes, N).set_index(["condition", "site_um"])
     site = N["example_site_um"]
     split = "".join(f"<tr><td>{c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')}</td><td>{el.early[(c, site)]:.3f}</td>"
@@ -385,8 +387,13 @@ def noise_html(spikes, examples, S: dict) -> str:
             f"({N['n_blocks']} blocks × {N['inputs_per_block']} inputs, one every {N['period_ms']:g} ms); Ca<sub>LVA</sub> "
             f"{N['g_ca_mS_cm2']:g} mS/cm². Extra spikes = spikes with the synapse − spikes with the same noise and no "
             "synapse; confidence intervals by bootstrap over inputs.</p>" + table
-            + _figure(fig, "<b>Noisy somatic current.</b> <b>a, b</b>, Somatic potential during two inputs (dotted lines) "
-                           "of the first block, with the same noise, without (grey) and with (blue) the synapse. "
+            + _figure(fig, "<b>Noisy somatic current.</b> <b>a, b</b>, One synaptic input (dotted line) at "
+                           f"{N['example_site_um']:g} µm, with the same noise seed in both cells (mean and amplitude scaled "
+                           "to each cell's rheobase): grey, noise only; colour, noise + synapse. Without dendritic "
+                           "Ca<sub>LVA</sub> (a) the synapse does not fire the cell; with increasing, shifted Ca<sub>LVA</sub> "
+                           "(b) it does. This pattern occurred for "
+                           f"{contrast.get('n_found', 0)} of {contrast.get('n_inputs', 0)} inputs (block "
+                           f"{contrast.get('block', '–')}, input {contrast.get('input', '–')} shown). "
                            "<b>c–e</b>, PSTH of the spikes added by the synapse (with − without, 2 ms bins, 3-bin moving "
                            "average) for synapses at 100, 200 and 300 µm. <b>f</b>, Extra spikes per input against "
                            "synapse distance, mean and 95% CI. <b>g</b>, Firing rate around the input for a synapse at "

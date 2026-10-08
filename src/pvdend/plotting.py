@@ -894,19 +894,19 @@ def noise_figure(psth_data: dict, evoked, examples: dict, N: dict, psth_sites=(1
     conds = list(dict.fromkeys(evoked.condition))
     example_conditions = example_conditions or conds[1:2] + conds[-1:]
     letters = iter("abcdefghij")
+    contrast = examples.get("contrast") or {}
     for j, cond in enumerate(example_conditions[:2]):
         ax = fig.add_subplot(gs[0, 3 * j:3 * j + 3])
-        ex = examples.get(cond, {})
-        for tag, col, lw, lab in (("nosyn", "#b5b4ae", 0.7, "noise only"),
-                                  ("syn", PROFILE_COLORS["uniform"], 0.9, "noise + synapse (same noise)")):
-            if tag in ex:
-                ax.plot(*ex[tag], color=col, lw=lw, label=lab)
-        for k in range(2):
-            ax.axvline(k * N["period_ms"], color=INK, lw=0.6, ls=":")
-        ax.set(xlim=(-50, 2 * N["period_ms"] - 50), xlabel="Time from first synaptic input (ms)", ylabel="V$_{soma}$ (mV)",
-               title=f"{cond.replace('Ca_LVA', 'Ca$_{LVA}$')}: synapse at {N['example_site_um']:g} µm")
-        if j == 0:
-            ax.legend(loc="upper right", fontsize=5.5)
+        tr = contrast.get(cond, {})
+        col = noise_style(cond)["color"]
+        if "nosyn" in tr:
+            ax.plot(*tr["nosyn"], color="#b5b4ae", lw=0.8, label="noise only")
+        if "syn" in tr:
+            ax.plot(*tr["syn"], color=col, lw=1.0, label=f"noise + synapse at {N['example_site_um']:g} µm")
+        ax.axvline(0, color=INK, lw=0.6, ls=":")
+        ax.set(xlim=(-60, 100), ylim=(-85, 35), xlabel="Time from synaptic input (ms)", ylabel="V$_{soma}$ (mV)",
+               title=cond.replace("Ca_LVA", "Ca$_{LVA}$"))
+        ax.legend(loc="upper left", fontsize=5.5)
         panel_label(ax, next(letters))
     top = 0.0
     axes_p = []
