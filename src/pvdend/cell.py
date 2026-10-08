@@ -54,9 +54,10 @@ class PVCell:
     """
 
     def __init__(self, morphology="short", prune_side_branches=False, max_seg_len_um=2.0,
-                 swc_path=None, tip_xyz=None):
+                 swc_path=None, tip_xyz=None, mouth_scale=1.0, mouth_length_um=13.0):
         ensure_mechanisms()
         self.label = morphology
+        self.mouth_scale = mouth_scale
         self.soma, self.dend, self.apic, self.axon = [], [], [], []
 
         if swc_path is None:
@@ -72,6 +73,8 @@ class PVCell:
             self.target_path = morph.path_to_soma(self, tip)
             if prune_side_branches:
                 self._prune(morph.side_branches(self, self.target_path))
+            if mouth_scale != 1.0:
+                self._widen_mouth(mouth_scale, mouth_length_um)
             if max_seg_len_um:
                 for sec in self.target_path:
                     sec.nseg = max(sec.nseg, 2 * int(sec.L / max_seg_len_um / 2) + 1)
@@ -146,6 +149,17 @@ class PVCell:
             h.delete_section(sec=sec)
         self.dend = keep
         self._rebuild_lists()
+
+    def _widen_mouth(self, scale, length_um):
+        """Scale the target dendrite's diameter by `scale` at the soma, fading linearly to 1x at `length_um`."""
+        for sec in self.target_path:
+            d0 = self.distance(sec(0))
+            if d0 >= length_um:
+                break
+            pts = [(sec.x3d(i), sec.y3d(i), sec.z3d(i), sec.diam3d(i), d0 + sec.arc3d(i)) for i in range(sec.n3d())]
+            for i, (x, y, z, diam, d) in enumerate(pts):
+                f = 1 + (scale - 1) * max(0.0, 1 - d / length_um)
+                sec.pt3dchange(i, x, y, z, diam * f)
 
     # --- convenience ---------------------------------------------------------------
     def distance(self, seg) -> float:

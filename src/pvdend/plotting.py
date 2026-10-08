@@ -21,8 +21,8 @@ MORPH_STYLE = {
     "long": dict(color="#2a78d6", ls="-", label="long (400 µm)"),
 }
 # categorical slots in fixed order; 'none' is the neutral reference
-PROFILE_COLORS = {"none": INK_2, "uniform": "#2a78d6", "hotspot": "#eb6834",
-                  "increasing": "#1baf7a", "decreasing": "#eda100"}
+PROFILE_COLORS = {"none": INK_2, "uniform": "#2a78d6", "increasing": "#1baf7a"}
+ORANGE = "#eb6834"  # second categorical slot, used for inactivation (h) in gating plots
 SITE_CMAP = mpl.colors.LinearSegmentedColormap.from_list("site", ["#b9d3f2", "#2a78d6", "#0d2c55"])
 CA_CMAP = mpl.colors.LinearSegmentedColormap.from_list("ca", ["#f6d2c1", "#eb6834", "#7a2a0b"])
 
@@ -209,8 +209,15 @@ def plot_vs_distance(ax, result, metric, morphs=None, color=None, label=None, **
 
 # --- composite figures ---------------------------------------------------------------------
 
+def ca_label(cfg) -> str:
+    if cfg.ca_profile == "none":
+        return "none"
+    kin = "original kinetics" if cfg.ca_act_shift_mV == 0 else f"activation shifted {cfg.ca_act_shift_mV:g} mV"
+    return f"{cfg.ca_profile}, {cfg.g_ca_mS_cm2:g} mS/cm², {kin}"
+
+
 def describe(cfg) -> str:
-    ca = cfg.ca_profile if cfg.ca_profile == "none" else f"{cfg.ca_profile} ({cfg.ca_norm})"
+    ca = ca_label(cfg)
     stim = ("single event" if cfg.n_events == 1
             else f"{cfg.n_events} events at {cfg.freq_hz:g} Hz")
     flags = [f"somatic Ca$_{{LVA}}$ {'on' if cfg.somatic_ca_lva else 'off'}"]
@@ -218,6 +225,10 @@ def describe(cfg) -> str:
         flags.append("TTX")
     if cfg.prune_side_branches:
         flags.append("side branches pruned")
+    if cfg.mouth_scale != 1:
+        flags.append(f"mouth {cfg.mouth_scale:g}×")
+    if cfg.soma_bias_frac:
+        flags.append(f"bias {100 * cfg.soma_bias_frac:.0f}% rheobase")
     return (f"Dendritic Ca$_{{LVA}}$: {ca} | Exp2Syn {cfg.syn_weight_uS * 1e3:g} nS, {stim} | "
             + ", ".join(flags))
 
@@ -372,16 +383,18 @@ def mechanism_figure(D: dict):
     fig, axes = plt.subplots(3, 3, figsize=(TWO_COL, 165 * MM), layout="constrained")
     a = axes.ravel()
     g, rest = D["gating"], D["rest_mV"]
-    blue, orange, grey = PROFILE_COLORS["uniform"], PROFILE_COLORS["hotspot"], INK_2
+    blue, orange, grey = PROFILE_COLORS["uniform"], ORANGE, INK_2
 
     ax = a[0]
-    ax.plot(g.v, g.m_inf ** 2, color=blue, label="activation m∞²")
+    if D["cfg"].ca_act_shift_mV:
+        ax.plot(g.v, g.m0_inf ** 2, color=blue, ls="--", lw=0.8, label="m∞², original")
+    ax.plot(g.v, g.m_inf ** 2, color=blue, label="activation m∞²" + (", shifted" if D["cfg"].ca_act_shift_mV else ""))
     ax.plot(g.v, g.h_inf, color=orange, label="availability h∞")
     ax.axvline(rest, color=grey, lw=0.6, ls=":")
     ax.annotate(f"rest, h∞ = {D['h_rest']:.2f}", (rest, D["h_rest"]), xytext=(4, 8),
                 textcoords="offset points", fontsize=6, color=grey)
     ax.set(xlabel="V (mV)", ylabel="Steady state", title="Ca$_{LVA}$ gating", xlim=(-100, 20))
-    ax.legend(loc="center right")
+    ax.legend(loc="lower right", bbox_to_anchor=(1.0, 0.08))
 
     ax = a[1]
     ax.plot(g.v, g.m_tau, color=blue, label="τ$_m$")
@@ -418,8 +431,9 @@ def mechanism_figure(D: dict):
     ok = th.threshold_nS.notna()
     ax.plot(th.distance_um[ok], th.threshold_nS[ok], color=blue, marker="o", ms=3, mew=0)
     ax.plot(th.distance_um[~ok], [max(SCAN_WEIGHTS)] * int((~ok).sum()), "^", color=grey, ms=4, mew=0)
-    ax.text(th.distance_um[~ok].mean() if (~ok).any() else 100, max(SCAN_WEIGHTS) * 0.82,
-            f"no event up to {max(SCAN_WEIGHTS)} nS", ha="center", fontsize=6, color=grey)
+    if (~ok).any():
+        ax.text(th.distance_um[~ok].mean(), max(SCAN_WEIGHTS) * 0.82,
+                f"no event up to {max(SCAN_WEIGHTS)} nS", ha="center", fontsize=6, color=grey)
     ax.axhline(D["cfg"].syn_weight_uS * 1e3, color=grey, lw=0.6, ls=":")
     ax.set(xlabel="Synapse distance from soma (µm)", ylabel="Threshold synaptic weight (nS)",
            title="Synaptic strength needed for an event", xlim=(0, 405), ylim=(0, max(SCAN_WEIGHTS) * 1.08))
@@ -428,10 +442,10 @@ def mechanism_figure(D: dict):
     taus = sorted(D["tau"])
     for i, t in enumerate(taus):
         df = D["tau"][t]
-        ax.plot(df.distance_um, df.extra_local_mV, color=TAU_CMAP(i / max(len(taus) - 1, 1)),
+        ax.plot(df.distance_um, np.maximum(df.extra_local_mV, df.extra_tip_mV), color=TAU_CMAP(i / max(len(taus) - 1, 1)),
                 marker="o", ms=2, mew=0, label=f"τ$_{{decay}}$ = {t:g} ms")
     ax.axhline(EVENT_CRITERION_MV, color=grey, lw=0.6, ls=":")
-    ax.set(xlabel="Synapse distance from soma (µm)", ylabel="Local boost by Ca$_{LVA}$ (mV)",
+    ax.set(xlabel="Synapse distance from soma (µm)", ylabel="Boost by Ca$_{LVA}$, synapse or tip (mV)",
            title="Longer EPSPs trigger events closer in", xlim=(0, 405))
     ax.legend(loc="upper left")
 
@@ -439,12 +453,13 @@ def mechanism_figure(D: dict):
     on = D["cfg"].onset_ms
     ax = a[7]
     ax.plot(ex["none"]["t"], ex["none"]["v_syn"], color=grey, ls="--", label="no dendritic Ca$_{LVA}$")
-    ax.plot(ex["uniform"]["t"], ex["uniform"]["v_syn"], color=blue, label="uniform Ca$_{LVA}$")
+    prof = D["cfg"].ca_profile
+    ax.plot(ex[prof]["t"], ex[prof]["v_syn"], color=PROFILE_COLORS[prof], label=f"{prof} Ca$_{{LVA}}$")
     ax.set(xlabel="Time (ms)", ylabel="Local V (mV)", title=f"Event at {site:g} µm (5 nS)", xlim=(on - 5, on + 80))
     ax.legend(loc="upper right")
 
     ax = a[8]
-    u = ex["uniform"]
+    u = ex[prof]
     ax.plot(u["t"], u["m"] ** 2, color=blue, label="m²")
     ax.plot(u["t"], u["h"], color=orange, label="h")
     ax.plot(u["t"], u["m"] ** 2 * u["h"] / max((u["m"] ** 2 * u["h"]).max(), 1e-12), color=INK, lw=0.8,
@@ -562,7 +577,11 @@ def dendrogram_figure(cells: dict, gbar=None, gmax=None):
     return fig
 
 
-def diameter_figure(cells: dict):
+def mouth_cell_scale(cell) -> float:
+    return getattr(cell, "mouth_scale", 1.0)
+
+
+def diameter_figure(cells: dict, mouth_cell=None):
     """Diameter and cumulative membrane area along the target dendrite (short vs long)."""
     from .morphology import leaves, path_to_soma
     set_style()
@@ -591,6 +610,9 @@ def diameter_figure(cells: dict):
                      lw=1.4, label=f"target, {st['label']}", zorder=3)
         area = np.cumsum([s.area() for s, _ in segs])
         axes[1].plot([d for _, d in segs], area, color=st["color"], ls=st["ls"], lw=1.4, label=st["label"])
+    if mouth_cell is not None:
+        axes[0].plot(*profile(mouth_cell, mouth_cell.target_path), color="#4a3aa7", ls="-.", lw=1.2,
+                     label=f"target, long, {mouth_cell_scale(mouth_cell):g}× mouth", zorder=4)
     soma_area = sum(s.area() for s in ref.soma[0])
     axes[1].axhline(soma_area, color=INK_2, lw=0.6, ls=":")
     axes[1].text(5, soma_area * 1.03, f"soma membrane ({soma_area:.0f} µm²)", fontsize=6, color=INK_2, va="bottom")
@@ -712,4 +734,184 @@ def spike_traces_figure(study: dict, frac: float, profiles=("none", "uniform", "
     b = sl.bias_nA.iloc[0] if "bias_nA" in sl else 0.0
     fig.suptitle(f"Somatic bias {100 * frac:.0f}% of rheobase ({b:.3f} nA, rest {sl.vrest_soma_mV.iloc[0]:.1f} mV); "
                  f"single synaptic events, 5 nS; thick traces: the cell fires", fontsize=7)
+    return fig
+
+
+
+# --- figures of the factorial design -----------------------------------------------------------------
+
+def _cond_title(shift, g):
+    kin = "original kinetics" if shift == 0 else f"activation {shift:g} mV"
+    return f"{g:g} mS/cm², {kin}"
+
+
+def factorial_figure(grid: dict, mouth=1.0):
+    """Columns: (activation shift, density); rows: somatic EPSP and local Ca_LVA boost against distance."""
+    from .mechanism import EVENT_CRITERION_MV
+    set_style()
+    keys = sorted({(s, g) for s, g, m in grid if m == mouth}, key=lambda k: (k[0] != 0, k[1]))
+    fig, axes = plt.subplots(2, len(keys), figsize=(TWO_COL, 105 * MM), layout="constrained", sharey="row",
+                             sharex=True)
+    for j, (shift, g) in enumerate(keys):
+        res = grid[(shift, g, mouth)]
+        ax = axes[0, j]
+        plot_vs_distance(ax, res["none"], "peak_soma_mV", morphs=["short"])
+        for prof, r in res.items():
+            plot_vs_distance(ax, r, "peak_soma_mV", morphs=["long"], color=PROFILE_COLORS[prof],
+                             label=f"long, {prof}" if prof != "none" else "long, no Ca$_{LVA}$")
+        ax.set_title(_cond_title(shift, g))
+        ax.set_xlabel("")
+        if j:
+            ax.set_ylabel("")
+        ax = axes[1, j]
+        base = res["none"].summary.query("morphology == 'long'").set_index("site_um")
+        for prof, r in res.items():
+            if prof == "none":
+                continue
+            s = r.summary.query("morphology == 'long'").set_index("site_um")
+            ax.plot(s.index, s.peak_syn_mV - base.peak_syn_mV, color=PROFILE_COLORS[prof], marker="o", ms=2, mew=0,
+                    lw=1)
+            ax.plot(s.index, s.peak_tip_mV - base.peak_tip_mV, color=PROFILE_COLORS[prof], ls="--", lw=0.8)
+        ax.axhline(EVENT_CRITERION_MV, color=INK_2, lw=0.6, ls=":")
+        ax.set(xlim=(0, 405), xlabel="Synapse distance from soma (µm)",
+               ylabel="Boost by Ca$_{LVA}$ (mV)" if j == 0 else "")
+        if j == 0:
+            ax.plot([], [], color=INK_2, lw=1, label="at the synapse")
+            ax.plot([], [], color=INK_2, lw=0.8, ls="--", label="at the tip")
+            ax.legend(loc="upper left", fontsize=5.5)
+        panel_label(axes[0, j], "abcd"[j])
+        panel_label(axes[1, j], "efgh"[j])
+    h_, l_ = axes[0, 0].get_legend_handles_labels()
+    fig.legend(h_, l_, loc="outside lower center", ncol=len(l_))
+    return fig
+
+
+def mouth_figure(grid: dict, metric="peak_soma_mV"):
+    """Effect of the 1.5x mouth: ratio of the metric (wide / original mouth) against distance."""
+    set_style()
+    keys = sorted({(s, g) for s, g, m in grid}, key=lambda k: (k[0] != 0, k[1]))
+    mouths = sorted({m for _, _, m in grid})
+    if len(mouths) < 2:
+        return None
+    m0, m1 = mouths[0], mouths[-1]
+    fig, axes = plt.subplots(1, len(keys), figsize=(TWO_COL, 55 * MM), layout="constrained", sharey=True)
+    for j, (shift, g) in enumerate(keys):
+        ax = axes[j]
+        for prof in grid[(shift, g, m0)]:
+            for morph in (["short", "long"] if prof == "none" else ["long"]):
+                a = grid[(shift, g, m0)][prof].summary.query("morphology == @morph").set_index("site_um")[metric]
+                b = grid[(shift, g, m1)][prof].summary.query("morphology == @morph").set_index("site_um")[metric]
+                st = dict(MORPH_STYLE[morph]) if prof == "none" else dict(color=PROFILE_COLORS[prof], ls="-")
+                st.pop("label", None)
+                lab = (MORPH_STYLE[morph]["label"] + (", no Ca$_{LVA}$" if morph == "long" else "")
+                       if prof == "none" else f"long, {prof}")
+                ax.plot(a.index, 100 * (b / a - 1), marker="o", ms=2, mew=0, lw=1, label=lab, **st)
+        ax.axhline(0, color=INK_2, lw=0.6)
+        ax.set(title=_cond_title(shift, g), xlabel="Synapse distance from soma (µm)", xlim=(0, 405),
+               ylabel=f"Change with {m1:g}× mouth (%)" if j == 0 else "")
+        panel_label(ax, "abcd"[j])
+    h_, l_ = axes[0].get_legend_handles_labels()
+    fig.legend(h_, l_, loc="outside lower center", ncol=len(l_))
+    return fig
+
+
+def electrotonic_figure(imp: dict, grid_none: dict, grid_ca=None, ca_label_text=""):
+    """Impedance map along the target dendrite and EPSP time course against distance.
+
+    imp: {label: DataFrame from mechanism.impedance_profile}; grid_none: {'short': Result, 'long': Result,
+    'long, mouth': Result} without dendritic Ca; grid_ca: optional Result with dendritic Ca (long).
+    """
+    set_style()
+    fig, axes = plt.subplots(2, 3, figsize=(TWO_COL, 110 * MM), layout="constrained")
+    a = axes.ravel()
+    styles = {"short": dict(color=INK_2, ls="--"), "long": dict(color=INK, ls="-"),
+              "long, 1.5× mouth": dict(color="#4a3aa7", ls="-.")}
+    for label, df in imp.items():
+        st = styles.get(label, dict(color=INK, ls="-"))
+        a[0].plot(df.distance_um, df["zin_0Hz_MOhm"], lw=1.2, label=label, **st)
+        a[0].plot(df.distance_um, df["zin_100Hz_MOhm"], lw=0.7, alpha=0.6, **st)
+        a[1].plot(df.distance_um, df["ztr_0Hz_MOhm"], lw=1.2, **st)
+        a[1].plot(df.distance_um, df["ztr_100Hz_MOhm"], lw=0.7, alpha=0.6, **st)
+        a[2].plot(df.distance_um, df["ztr_0Hz_MOhm"] / df["zin_0Hz_MOhm"], lw=1.2, **st)
+    a[0].axhline(next(iter(imp.values()))["zin_soma_0Hz_MOhm"].iloc[0], color=INK_2, lw=0.6, ls=":")
+    log_axis(a[0])
+    a[0].set(title="Local input impedance", ylabel="|Z$_{in}$| (MΩ)")
+    a[1].set(title="Transfer impedance to the soma", ylabel="|Z$_{transfer}$| (MΩ)")
+    a[2].set(title="Steady-state voltage attenuation", ylabel="V$_{soma}$ / V$_{local}$")
+    a[0].plot([], [], color=INK_2, lw=1.2, label="0 Hz")
+    a[0].plot([], [], color=INK_2, lw=0.7, alpha=0.6, label="100 Hz")
+    a[0].legend(loc="lower right", fontsize=5.5)
+    for ax in a[:3]:
+        ax.set(xlabel="Distance from soma (µm)", xlim=(0, 405))
+
+    metrics = (("area_mVms", "EPSP integral (mV·ms)"), ("tau_eff_ms", "Effective time constant (ms)"),
+               ("tau_decay_ms", "Decay time constant (ms)"))
+    for ax, (key, ylabel) in zip(a[3:], metrics):
+        for label, res in grid_none.items():
+            morph = "short" if label == "short" else "long"
+            st = styles.get(label, dict(color=INK, ls="-"))
+            sub = res.summary[res.summary.morphology == morph].sort_values("site_um")
+            ax.plot(sub.site_um, sub[f"{key}_soma"], lw=1.2, marker="o", ms=1.8, mew=0, **st,
+                    label=f"{label}, soma")
+            ax.plot(sub.site_um, sub[f"{key}_syn"], lw=0.7, alpha=0.6, **st, label=f"{label}, synapse")
+        if grid_ca is not None:
+            sub = grid_ca.summary[grid_ca.summary.morphology == "long"].sort_values("site_um")
+            col = PROFILE_COLORS[grid_ca.config.ca_profile]
+            ax.plot(sub.site_um, sub[f"{key}_soma"], color=col, lw=1.2, marker="o", ms=1.8, mew=0,
+                    label=f"long + Ca$_{{LVA}}$ ({ca_label_text}), soma")
+            ax.plot(sub.site_um, sub[f"{key}_syn"], color=col, lw=0.7, alpha=0.6,
+                    label="long + Ca$_{LVA}$, synapse")
+        ax.set(xlabel="Synapse distance from soma (µm)", ylabel=ylabel, xlim=(0, 405), title=ylabel.split(" (")[0])
+        if key == "area_mVms":
+            log_axis(ax)
+    h_, l_ = a[3].get_legend_handles_labels()
+    fig.legend(h_, l_, loc="outside lower center", ncol=4, fontsize=5.5)
+    for ax, letter in zip(a, "abcdef"):
+        panel_label(ax, letter)
+    return fig
+
+
+def noise_figure(df, examples: dict, evoked, example_conditions, example_site_um, spec_noise):
+    """Noisy somatic current: example traces, evoked spike probability and latency against distance."""
+    set_style()
+    fig = plt.figure(figsize=(TWO_COL, 110 * MM), layout="constrained")
+    gs = fig.add_gridspec(2, 2)
+    for j, cond in enumerate(example_conditions):
+        ax = fig.add_subplot(gs[0, j])
+        ex = examples.get(cond, {})
+        on = spec_noise["warmup_ms"]
+        for i in range(3):
+            for tag, col, lw in (("nosyn", "#b5b4ae", 0.6), ("syn", PROFILE_COLORS["uniform"], 0.8)):
+                if f"{tag}_{i}_t" in ex:
+                    off = -i * 0  # overlay
+                    ax.plot(ex[f"{tag}_{i}_t"] - on, ex[f"{tag}_{i}_v"] + off, color=col, lw=lw)
+        ax.axvline(0, color=INK, lw=0.6, ls=":")
+        ax.set(xlim=(-60, spec_noise["window_ms"] + 15), xlabel="Time from synaptic input (ms)",
+               ylabel="V$_{soma}$ (mV)", title=f"{cond}: synapse at {example_site_um:g} µm")
+        ax.plot([], [], color="#b5b4ae", label="noise only")
+        ax.plot([], [], color=PROFILE_COLORS["uniform"], label="noise + synapse (same noise)")
+        if j == 0:
+            ax.legend(loc="upper left", fontsize=5.5)
+        panel_label(ax, "ab"[j])
+    ax_p = fig.add_subplot(gs[1, 0])
+    ax_l = fig.add_subplot(gs[1, 1])
+    palette = {"short": dict(color=INK_2, ls="--"), "long, no Ca_LVA": dict(color=INK, ls="-")}
+    for cond, grp in evoked.groupby("condition", sort=False):
+        if cond in palette:
+            st = palette[cond]
+        else:
+            prof = "increasing" if "increasing" in cond else "uniform"
+            st = dict(color=PROFILE_COLORS[prof], ls="-" if "shifted" in cond else ":")
+        lab = cond.replace("Ca_LVA", "Ca$_{LVA}$")
+        ax_p.plot(grp.site_um, grp.p_evoked, marker="o", ms=2.5, mew=0, lw=1, label=lab, **st)
+        ax_l.plot(grp.site_um, grp.latency_ms, marker="o", ms=2.5, mew=0, lw=1, **st)
+    ax_p.axhline(0, color=INK_2, lw=0.6)
+    ax_p.set(xlabel="Synapse distance from soma (µm)", ylabel="Evoked spike probability",
+             title=f"Extra spikes within {spec_noise['window_ms']:g} ms of the input", xlim=(0, 405))
+    ax_l.set(xlabel="Synapse distance from soma (µm)", ylabel="Median first-spike latency (ms)",
+             title="Spike timing after the input", xlim=(0, 405))
+    panel_label(ax_p, "c")
+    panel_label(ax_l, "d")
+    h_, l_ = ax_p.get_legend_handles_labels()
+    fig.legend(h_, l_, loc="outside lower center", ncol=3, fontsize=5.5)
     return fig

@@ -20,15 +20,16 @@ from .config import Config
 from .morphology import path_location
 from .protocols import get_cell, run_site, steady_state_init
 
-EVENT_CRITERION_MV = 10.0  # extra local depolarisation due to Ca_LVA that counts as an event
+EVENT_CRITERION_MV = 10.0  # extra depolarisation due to Ca_LVA, at the synapse or at the tip, that counts as an event
 
 
-def ca_lva_rates(v, celsius=34.0):
-    """mInf, mTau, hInf, hTau of Ca_LVA (numpy copy of PROCEDURE rates in mod/Ca_LVA.mod)."""
+def ca_lva_rates(v, celsius=34.0, act_shift_mV=0.0):
+    """mInf, mTau, hInf, hTau of Ca_LVA (numpy copy of PROCEDURE rates in mod/Ca_LVA_dend.mod)."""
     qt = 2.3 ** ((celsius - 21) / 10)
     v = np.asarray(v, dtype=float) + 10
-    m_inf = 1 / (1 + np.exp((v + 30) / -6))
-    m_tau = (5 + 20 / (1 + np.exp((v + 25) / 5))) / qt
+    va = v - act_shift_mV
+    m_inf = 1 / (1 + np.exp((va + 30) / -6))
+    m_tau = (5 + 20 / (1 + np.exp((va + 25) / 5))) / qt
     h_inf = 1 / (1 + np.exp((v + 80) / 6.4))
     h_tau = (20 + 50 / (1 + np.exp((v + 40) / 7))) / qt
     return m_inf, m_tau, h_inf, h_tau
@@ -80,7 +81,8 @@ def local_epsp_shape(result, morph: str, threshold_mV=-50.0) -> pd.DataFrame:
 def threshold_scan(cfg: Config, sites_um, weights_nS, profile="uniform", folder=None) -> pd.DataFrame:
     """Local peak with and without dendritic Ca_LVA for every (site, weight); cached as CSV."""
     folder = Path(folder or RESULTS_DIR / "mechanism")
-    tag = f"scan_{profile}_{cfg.ca_norm}_w{len(weights_nS)}_s{len(sites_um)}.csv"
+    tag = (f"scan_{profile}_g{cfg.g_ca_mS_cm2:g}_s{cfg.ca_act_shift_mV:g}_m{cfg.mouth_scale:g}"
+           f"_w{len(weights_nS)}_s{len(sites_um)}.csv")
     path = folder / tag
     if path.exists():
         return pd.read_csv(path)
@@ -95,8 +97,8 @@ def threshold_scan(cfg: Config, sites_um, weights_nS, profile="uniform", folder=
                 tr = run_site(cell, c, d)
                 pre = tr["t"] < c.onset_ms
                 rows.append(dict(profile=prof, weight_nS=w, distance_um=d,
-                                 peak_syn_mV=(tr["v_syn"] - tr["v_syn"][pre].mean()).max(),
-                                 peak_soma_mV=(tr["v_soma"] - tr["v_soma"][pre].mean()).max()))
+                                 **{f"peak_{k}_mV": (tr[f"v_{k}"] - tr[f"v_{k}"][pre].mean()).max()
+                                    for k in ("syn", "tip", "soma")}))
     df = pd.DataFrame(rows)
     folder.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
@@ -104,10 +106,10 @@ def threshold_scan(cfg: Config, sites_um, weights_nS, profile="uniform", folder=
 
 
 def thresholds(scan: pd.DataFrame, profile="uniform") -> pd.DataFrame:
-    """Smallest weight at which Ca_LVA adds > EVENT_CRITERION_MV to the local peak."""
-    a = scan[scan.profile == profile].set_index(["distance_um", "weight_nS"]).peak_syn_mV
-    b = scan[scan.profile == "none"].set_index(["distance_um", "weight_nS"]).peak_syn_mV
-    extra = (a - b).reset_index(name="extra_mV")
+    """Smallest weight at which Ca_LVA adds > EVENT_CRITERION_MV at the synapse or at the tip."""
+    a = scan[scan.profile == profile].set_index(["distance_um", "weight_nS"])
+    b = scan[scan.profile == "none"].set_index(["distance_um", "weight_nS"])
+    extra = np.maximum(a.peak_syn_mV - b.peak_syn_mV, a.peak_tip_mV - b.peak_tip_mV).reset_index(name="extra_mV")
     out = []
     for d, grp in extra.groupby("distance_um"):
         hit = grp[grp.extra_mV > EVENT_CRITERION_MV].weight_nS
@@ -126,7 +128,7 @@ def gating_traces(cfg: Config, site_um: float) -> dict:
         extra = {}
         if prof != "none":
             for name in ("m", "h"):
-                extra[name] = h.Vector().record(getattr(sec(x), f"_ref_{name}_Ca_LVA"))
+                extra[name] = h.Vector().record(getattr(sec(x), f"_ref_{name}_Ca_LVA_dend"))
         tr = run_site(cell, c, site_um)  # finitialize inside also starts the extra recordings
         tr.update({k: np.array(v) for k, v in extra.items()})
         out[prof] = tr
@@ -146,11 +148,11 @@ def event_extra(cfg: Config, sites_um, tag: str, folder=None) -> pd.DataFrame:
         for d in sites_um:
             tr = run_site(cell, c, d)
             pre = tr["t"] < c.onset_ms
-            peaks[(prof, d)] = ((tr["v_syn"] - tr["v_syn"][pre].mean()).max(),
-                                (tr["v_soma"] - tr["v_soma"][pre].mean()).max())
+            peaks[(prof, d)] = [(tr[f"v_{k}"] - tr[f"v_{k}"][pre].mean()).max() for k in ("syn", "soma", "tip")]
     df = pd.DataFrame([dict(distance_um=d,
                             extra_local_mV=peaks[(cfg.ca_profile, d)][0] - peaks[("none", d)][0],
-                            extra_soma_mV=peaks[(cfg.ca_profile, d)][1] - peaks[("none", d)][1])
+                            extra_soma_mV=peaks[(cfg.ca_profile, d)][1] - peaks[("none", d)][1],
+                            extra_tip_mV=peaks[(cfg.ca_profile, d)][2] - peaks[("none", d)][2])
                        for d in sites_um])
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
@@ -164,31 +166,33 @@ TAU2_VALUES = (3.0, 6.0, 10.0, 20.0)
 EXAMPLE_SITE = 250.0
 
 
-def collect(cfg: Config | None = None) -> dict:
-    """Everything the mechanism figure and text need (uniform Ca_LVA, 'peak' densities)."""
-    cfg = (cfg or Config()).replace(ca_profile="uniform", ca_norm="peak")
+def collect(cfg: Config) -> dict:
+    """Everything the mechanism figure and text need, for the Ca_LVA condition in `cfg`."""
     from .protocols import load_or_run
     passive = load_or_run(cfg.replace(name="mechanism_passive", ca_profile="none", n_events=1))
     v = np.linspace(-100, 20, 241)
-    m_inf, m_tau, h_inf, h_tau = ca_lva_rates(v, cfg.celsius)
+    m_inf, m_tau, h_inf, h_tau = ca_lva_rates(v, cfg.celsius, cfg.ca_act_shift_mV)
+    m0_inf, m0_tau, _, _ = ca_lva_rates(v, cfg.celsius, 0.0)
+    tag = f"g{cfg.g_ca_mS_cm2:g}_s{cfg.ca_act_shift_mV:g}_m{cfg.mouth_scale:g}"
     rest = float(passive.summary.vrest_syn_mV.mean())
-    scan = threshold_scan(cfg, SCAN_SITES, SCAN_WEIGHTS)
+    scan = threshold_scan(cfg, SCAN_SITES, SCAN_WEIGHTS, profile=cfg.ca_profile)
     return dict(
         cfg=cfg, rest_mV=rest,
-        gating=pd.DataFrame(dict(v=v, m_inf=m_inf, m_tau=m_tau, h_inf=h_inf, h_tau=h_tau)),
+        gating=pd.DataFrame(dict(v=v, m_inf=m_inf, m_tau=m_tau, h_inf=h_inf, h_tau=h_tau,
+                                 m0_inf=m0_inf, m0_tau=m0_tau)),
         h_rest=float(ca_lva_rates(rest, cfg.celsius)[2]),
         impedance={m: impedance_profile(m, cfg) for m in ("short", "long")},
         lam_um=length_constant_um(cfg),
         epsp={m: local_epsp_shape(passive, m) for m in ("short", "long")},
-        scan=scan, thresholds=thresholds(scan),
-        tau={t: event_extra(cfg.replace(syn_tau2_ms=t), TAU_SITES, f"uniform_tau2_{t:g}")
+        scan=scan, thresholds=thresholds(scan, cfg.ca_profile),
+        tau={t: event_extra(cfg.replace(syn_tau2_ms=t), TAU_SITES, f"{cfg.ca_profile}_{tag}_tau2_{t:g}")
              for t in TAU2_VALUES},
-        profiles={p: event_extra(cfg.replace(ca_profile=p), TAU_SITES, f"{p}_tau2_3")
-                  for p in ("uniform", "hotspot", "increasing", "decreasing")},
+        profiles={p: event_extra(cfg.replace(ca_profile=p), TAU_SITES, f"{p}_{tag}_tau2_3")
+                  for p in ("uniform", "increasing")},
         example=gating_traces(cfg, EXAMPLE_SITE), example_site=EXAMPLE_SITE,
     )
 
 
 def onset_um(extra: pd.DataFrame, criterion=EVENT_CRITERION_MV) -> float:
-    hit = extra[extra.extra_local_mV > criterion].distance_um
+    hit = extra[np.maximum(extra.extra_local_mV, extra.extra_tip_mV) > criterion].distance_um
     return float(hit.min()) if len(hit) else np.nan

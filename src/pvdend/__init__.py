@@ -8,7 +8,7 @@ Typical use::
 """
 __version__ = "0.1.0"
 
-from .config import CA_NORMS, CA_PROFILES, Config
+from .config import CA_PROFILES, Config
 from .protocols import Result, get_cell, load_or_run, run_sweep
 
-__all__ = ["Config", "CA_PROFILES", "CA_NORMS", "Result", "run_sweep", "load_or_run", "get_cell"]
+__all__ = ["Config", "CA_PROFILES", "Result", "run_sweep", "load_or_run", "get_cell"]

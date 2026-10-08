@@ -1,15 +1,14 @@
-"""One self-contained HTML report with every figure set in configs/figure_set.json.
+"""One self-contained HTML report of all studies in configs/studies.json.
 
-Figures are drawn by the same functions as scripts/ and the notebook, from the
-cached results (results/), and embedded as vector SVG.
+Figures are drawn by the same functions as scripts/ and the notebook, from the cached
+results (results/), embedded as vector SVG, and also saved as PDF/PNG in figures/.
+Every number in the text is computed from the results when the report is built.
 """
 from __future__ import annotations
 
 import base64
 import datetime as dt
-import html
 import io
-import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -17,33 +16,13 @@ import neuron
 import numpy as np
 
 from . import __version__, manuscript, mechanism, plotting, studies, viewer3d
-from ._paths import CONFIG_DIR, FIGURES_DIR
+from ._paths import FIGURES_DIR
 from .config import Config
 from .morphology import load_target_meta, path_geometry
-from .protocols import get_cell, load_or_run
+from .protocols import get_cell
 
 TABLE_SITES = (10, 100, 200, 300, 400)
-
-CAPTION_COMPARISON = (
-    "<b>a</b>, Ca<sub>LVA</sub> density along the target dendrite of the long morphology for each profile. "
-    "<b>b</b>, Peak somatic EPSP as a function of synapse distance from the soma. Dashed grey: short "
-    "morphology (no dendritic Ca<sub>LVA</sub>); solid: long morphology, one colour per profile. "
-    "<b>c</b>, Peak local EPSP at the synapse. <b>d</b>, Attenuation, somatic / local peak (log scale). "
-    "<b>e</b>, Peak local change in [Ca<sup>2+</sup>]<sub>i</sub> at the synapse. "
-    "<b>f</b>, Area of the somatic depolarisation above rest. "
-    "Where a coloured curve leaves the dark-grey <i>none</i> curve, the synapse triggers a regenerative "
-    "Ca<sub>LVA</sub> event in the dendrite (large jump in <b>c</b> and <b>e</b>); the event spreads to the soma "
-    "and lifts the somatic EPSP (<b>b</b>, <b>f</b>). Why this happens only beyond a certain distance is "
-    "explained in the <a href='#mechanism'>Mechanism</a> section.")
-CAPTION_OVERVIEW = (
-    "<b>a, b</b>, Dendrograms of the short and long cells (branches laid out by path distance from the soma); "
-    "the target dendrite is highlighted (in <b>b</b> coloured by Ca<sub>LVA</sub> density, with a tick at the "
-    "original tip) and circles mark the synapse sites whose traces are shown. "
-    "<b>c</b>, Ca<sub>LVA</sub> density along the long dendrite. <b>d, e</b>, Somatic membrane potential for "
-    "synapses at increasing distance (colour scale). <b>f</b>, Membrane potential at the synapse, long "
-    "morphology. <b>g–i</b>, Somatic EPSP, local EPSP and attenuation versus synapse distance. "
-    "In <b>f</b>, traces with a delayed second hump are synapses that trigger a Ca<sub>LVA</sub> event: the "
-    "synaptic EPSP comes first, the Ca<sub>LVA</sub> depolarisation builds up a few milliseconds later.")
+SHIFT_TXT = {0.0: "original", -15.0: "shifted −15 mV"}
 
 CSS = """
 :root { --ink:#0b0b0b; --ink2:#52514e; --rule:#d9d8d4; --bg:#fcfcfb; --accent:#2a78d6; }
@@ -73,8 +52,19 @@ ol.refs li { margin:4px 0; }
                figure { break-inside:avoid; } }
 """
 
+AI_STATEMENT = (
+    "<b>Use of AI tools.</b> Claude (Anthropic) was used as an AI programming assistant: to convert the original "
+    "HOC model code to Python, and to help write the simulation scripts, including the script that grows the "
+    "dendrite, as well as the figures and this report. The scientific questions, the choice of models and analyses, "
+    "and the interpretation of the results are the author's. The author takes full and sole responsibility "
+    "for all results and text.")
 
-def _svg(fig) -> str:
+
+# --- helpers ---------------------------------------------------------------------------------------
+
+def _svg(fig, save_as=None) -> str:
+    if save_as:
+        plotting.save_figure(fig, save_as, formats=("pdf", "png"))
     buf = io.StringIO()
     fig.savefig(buf, format="svg", bbox_inches="tight")
     plt.close(fig)
@@ -82,232 +72,113 @@ def _svg(fig) -> str:
     return f'<img alt="figure" src="data:image/svg+xml;base64,{data}">'
 
 
-def describe_html(cfg: Config) -> str:
-    stim = "single event" if cfg.n_events == 1 else f"{cfg.n_events} events at {cfg.freq_hz:g} Hz"
-    norm = ("peak densities (uniform {:g}, others {:g} S/cm²)".format(cfg.g_uniform, cfg.g_peak)
-            if cfg.ca_norm == "peak" else
-            f"equal total conductance (uniform-equivalent {cfg.g_total_equiv:g} S/cm²)")
-    parts = [f"Exp2Syn {cfg.syn_weight_uS * 1e3:g} nS (τ {cfg.syn_tau1_ms:g}/{cfg.syn_tau2_ms:g} ms), {stim}",
-             f"dendritic Ca<sub>LVA</sub> normalised by {norm}",
-             f"somatic Ca<sub>LVA</sub> {'on' if cfg.somatic_ca_lva else 'off'}",
-             "TTX" if cfg.ttx else "no TTX",
-             f"sites every {cfg.site_step_um:g} µm from {cfg.site_start_um:g} µm"]
-    if cfg.prune_side_branches:
-        parts.append("side branches pruned")
-    return "; ".join(parts) + "."
+def _figure(fig, caption, save_as=None) -> str:
+    return f"<figure>{_svg(fig, save_as)}<figcaption>{caption}</figcaption></figure>"
 
 
 def _value(res, morph, site, col):
     df = res.summary
     row = df[(df.morphology == morph) & (np.isclose(df.site_um, site))]
-    return row[col].iloc[0] if len(row) else np.nan
+    return float(row[col].iloc[0]) if len(row) else np.nan
 
 
 def _fmt(x, digits=2):
     return "–" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.{digits}f}"
 
 
+def ca_boost(results: dict, prof: str):
+    """Extra depolarisation due to dendritic Ca_LVA (long cell), max of synapse and tip, per site."""
+    a = results[prof].summary.query("morphology == 'long'").set_index("site_um")
+    b = results["none"].summary.query("morphology == 'long'").set_index("site_um")
+    return np.maximum(a.peak_syn_mV - b.peak_syn_mV, a.peak_tip_mV - b.peak_tip_mV)
+
+
 def event_sites(results: dict, prof: str, criterion=mechanism.EVENT_CRITERION_MV) -> list:
-    """Sites (long cell) where dendritic Ca_LVA adds > criterion mV to the local EPSP."""
+    """Sites whose synapse triggers a Ca_LVA event (> criterion mV added at the synapse or at the tip)."""
     if "none" not in results or prof == "none":
         return []
-    a = results[prof].summary.query("morphology == 'long'").set_index("site_um").peak_syn_mV
-    b = results["none"].summary.query("morphology == 'long'").set_index("site_um").peak_syn_mV
-    return [float(d) for d in (a - b)[(a - b) > criterion].index]
+    x = ca_boost(results, prof)
+    return [float(d) for d in x[x > criterion].index]
+
+
+def max_boost(results: dict, prof: str) -> float:
+    return float(ca_boost(results, prof).max())
+
+
+def nearest_boosted(results: dict, prof: str, rel=0.10) -> float:
+    """Nearest synapse whose somatic EPSP Ca_LVA increases by more than `rel`."""
+    a = results[prof].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+    b = results["none"].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+    hit = (a / b - 1)[(a / b - 1) > rel].index
+    return float(min(hit)) if len(hit) else np.nan
 
 
 def _range(sites) -> str:
     return f"{min(sites):g}–{max(sites):g}" if sites else "none"
 
 
-def summary_table(results: dict) -> str:
+def _keys(grid, mouth=1.0):
+    return sorted({(s, g) for s, g, m in grid if m == mouth}, key=lambda k: (k[0] != 0, k[1]))
+
+
+def condition_table(grid: dict, mouth=1.0, metric="peak_soma_mV", unit="Somatic EPSP (mV)") -> str:
     head = "".join(f"<th>{s} µm</th>" for s in TABLE_SITES)
     rows = []
-    first = next(iter(results.values()))
-    if "short" in first.config.morphologies:
-        cells = "".join(f"<td>{_fmt(_value(first, 'short', s, 'peak_soma_mV'))}</td>" for s in TABLE_SITES)
-        n_spk = int(first.summary[first.summary.morphology == "short"].n_spikes_soma.sum())
-        rows.append(f"<tr><td><span class='swatch' style='background:{plotting.INK_2}'></span>"
-                    f"short (no dendritic Ca)</td>{cells}<td>–</td><td>–</td>"
-                    f"<td>{n_spk}</td></tr>")
-    for prof, res in results.items():
-        long = res.summary[res.summary.morphology == "long"]
-        cells = "".join(f"<td>{_fmt(_value(res, 'long', s, 'peak_soma_mV'))}</td>" for s in TABLE_SITES)
-        rows.append(f"<tr><td><span class='swatch' style='background:{plotting.PROFILE_COLORS[prof]}'></span>"
-                    f"long, {prof}</td>{cells}<td>{_range(event_sites(results, prof)) if prof != 'none' else '–'}</td>"
-                    f"<td>{_fmt(long.dcai_syn_uM.max(), 3)}</td>"
-                    f"<td>{int(long.n_spikes_soma.sum())}</td></tr>")
-    return ("<div class='tablewrap'><table><thead><tr><th rowspan='2'>Morphology, Ca profile</th>"
-            f"<th colspan='{len(TABLE_SITES)}'>Somatic EPSP (mV) for a synapse at</th>"
-            "<th rowspan='2'>Ca event for synapses at (µm)</th>"
-            "<th rowspan='2'>max local Δ[Ca<sup>2+</sup>]<sub>i</sub> (µM)</th>"
-            "<th rowspan='2'>somatic spikes (all sites)</th></tr>"
+    first = grid[next(iter(grid))]
+    for morph in ("short", "long"):
+        cells = "".join(f"<td>{_fmt(_value(first['none'], morph, s, metric))}</td>" for s in TABLE_SITES)
+        lab = "short (no dendritic Ca)" if morph == "short" else "long, no dendritic Ca"
+        rows.append(f"<tr><td><span class='swatch' style='background:{plotting.INK_2}'></span>{lab}</td>"
+                    f"<td>–</td><td>–</td>{cells}<td>–</td><td>–</td></tr>")
+    for shift, g in _keys(grid, mouth):
+        res = grid[(shift, g, mouth)]
+        for prof, r in res.items():
+            if prof == "none":
+                continue
+            cells = "".join(f"<td>{_fmt(_value(r, 'long', s, metric))}</td>" for s in TABLE_SITES)
+            rows.append(f"<tr><td><span class='swatch' style='background:{plotting.PROFILE_COLORS[prof]}'></span>"
+                        f"long, {prof}</td><td>{SHIFT_TXT.get(shift, shift)}</td><td>{g:g}</td>{cells}"
+                        f"<td>{_range(event_sites(res, prof))}</td><td>{max_boost(res, prof):.1f}</td></tr>")
+    return ("<div class='tablewrap'><table><thead><tr><th rowspan='2'>Cell, Ca<sub>LVA</sub> profile</th>"
+            "<th rowspan='2'>Kinetics</th><th rowspan='2'>g (mS/cm²)</th>"
+            f"<th colspan='{len(TABLE_SITES)}'>{unit} for a synapse at</th>"
+            "<th rowspan='2'>Ca event for synapses at (µm)</th><th rowspan='2'>max Ca boost (mV)</th></tr>"
             f"<tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
 
 
-def set_findings(results: dict, note: str = "") -> str:
-    """Short, data-driven list of what each figure set shows."""
-    first = next(iter(results.values()))
-    items = []
-    if "none" in results:
-        n = results["none"]
-        items.append(
-            f"Without dendritic Ca<sub>LVA</sub>, the somatic EPSP of the long cell falls from "
-            f"{_value(n, 'long', 10, 'peak_soma_mV'):.2f} mV (synapse at 10 µm) to "
-            f"{_value(n, 'long', 400, 'peak_soma_mV'):.2f} mV (400 µm); in the short cell it is "
-            f"{_value(n, 'short', 100, 'peak_soma_mV'):.2f} mV at its 100 µm tip, against "
-            f"{_value(n, 'long', 100, 'peak_soma_mV'):.2f} mV at 100 µm in the long cell, which has more "
-            "membrane beyond that point to charge.")
-    for prof, res in results.items():
-        if prof == "none":
-            continue
-        sites = event_sites(results, prof)
-        long = res.summary[res.summary.morphology == "long"]
-        if sites:
-            ev = long[long.site_um.isin(sites)]
-            items.append(f"<b>{prof}</b>: Ca<sub>LVA</sub> event for synapses at {_range(sites)} µm; somatic EPSP "
-                         f"{ev.peak_soma_mV.min():.1f}–{ev.peak_soma_mV.max():.1f} mV for those synapses.")
-        else:
-            items.append(f"<b>{prof}</b>: no Ca<sub>LVA</sub> event at any site.")
-    spikes = int(sum(r.summary.n_spikes_soma.sum() for r in results.values()))
-    items.append("No somatic action potentials at any site." if spikes == 0
-                 else f"{spikes} somatic action potentials in total across sites and profiles.")
-    out = "<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>"
-    if note:
-        out += f"<p>{note}</p>"
-    return out
+# --- sections -------------------------------------------------------------------------------------
 
-
-def _at(df, col, d, xcol="distance_um"):
-    return float(df.iloc[int(np.argmin(np.abs(df[xcol].to_numpy() - d)))][col])
-
-
-def mechanism_html(D: dict, ref: dict) -> str:
-    """Explanation of the distance dependence of the Ca_LVA event, with numbers from mechanism.collect."""
-    cfg = D["cfg"]
-    zl, zs = D["impedance"]["long"], D["impedance"]["short"]
-    el = D["epsp"]["long"]
-    th = D["thresholds"]
-    fail = th[th.threshold_nS.isna()].distance_um
-    ok = th[th.threshold_nS.notna()]
-    tmin = ok.threshold_nS.min()
-    onset = {t: mechanism.onset_um(df) for t, df in D["tau"].items()}
-    pon = {p: mechanism.onset_um(df) for p, df in D["profiles"].items()}
-    hs = D["profiles"]["hotspot"]
-    hs_sites = hs[hs.extra_local_mV > mechanism.EVENT_CRITERION_MV].distance_um
-    lo, hi = cfg.hotspot_center_um - cfg.hotspot_width_um / 2, cfg.hotspot_center_um + cfg.hotspot_width_um / 2
-    ex, site, on = D["example"], D["example_site"], cfg.onset_ms
-    u, n = ex["uniform"], ex["none"]
-    k_ev = int(np.argmax(u["v_syn"]))
-    h_tau_rest = float(mechanism.ca_lva_rates(D["rest_mV"], cfg.celsius)[3])
-    gv = D["gating"]
-    tau_m_rng = gv[(gv.v >= -60) & (gv.v <= -40)].m_tau
-    cross40 = el[el.peak_abs_mV > -40].distance_um.min()
-    plateau = el[(el.distance_um >= 130) & (el.distance_um <= 250)].peak_abs_mV
-    none_l = ref["none"].summary.query("morphology == 'long'").sort_values("site_um")
-    uni_300 = _value(ref["uniform"], "long", 300, "peak_soma_mV") if "uniform" in ref else np.nan
-    equiv = float(np.interp(-uni_300, -none_l.peak_soma_mV.to_numpy(), none_l.site_um.to_numpy()))
-    ttx = ""
-    z = lambda d: _at(zl, "zin_0Hz_MOhm", d)  # noqa: E731
-
-    fig = _svg(plotting.mechanism_figure(D))
+def design_html(S: dict, cfg: Config) -> str:
+    F = S["factors"]
+    meta = load_target_meta()
     return f"""
-<h2 id="mechanism">Mechanism: why only distal synapses trigger a Ca<sub>LVA</sub> event</h2>
-<p><b>In short.</b> The dendritic Ca<sub>LVA</sub> response is a regenerative, all-or-none event. Whether a
-synapse can start it depends less on how many channels sit next to it than on how <i>long</i> the synapse can
-keep the surrounding membrane depolarised. Ca<sub>LVA</sub> opens slowly. Close to the soma, the soma and the
-rest of the cell drain the synaptic charge within a few milliseconds, so the local EPSP is too brief to open
-enough channels, however strong the synapse. Farther out, the thin dendrite is electrically more isolated,
-the local EPSP lasts longer, the channels have time to open, and their inward current depolarises the
-membrane further, which opens more channels. With the default synapse (Exp2Syn,
-{cfg.syn_weight_uS * 1e3:g} nS, τ<sub>decay</sub> {cfg.syn_tau2_ms:g} ms) and uniform Ca<sub>LVA</sub>
-({cfg.g_uniform:g} S/cm²), this transition lies near {onset[cfg.syn_tau2_ms]:.0f} µm from the soma.
-The analyses behind each step are in Figure M, all with the uniform profile unless stated.</p>
-
-<h3>1. The channel is slow, and most of it is inactivated at rest (M a, b)</h3>
-<p>Ca<sub>LVA</sub> conducts in proportion to m²h. Its activation is half-maximal at −40 mV (m∞² = 0.25 there),
-and its activation time constant τ<sub>m</sub> is {tau_m_rng.min():.1f}–{tau_m_rng.max():.1f} ms between −60
-and −40 mV ({cfg.celsius:g} °C); it falls to about 2 ms only above −20 mV. At rest ({D['rest_mV']:.1f} mV) only
-a fraction h∞ = {D['h_rest']:.2f} of the channels is available, and inactivation is itself slow
-(τ<sub>h</sub> ≈ {h_tau_rest:.0f} ms near rest). To recruit Ca<sub>LVA</sub>, a depolarisation must therefore
-pass about −50 to −40 mV <i>and stay there for several milliseconds</i>.</p>
-
-<h3>2. The soma is a strong current sink, and its pull weakens with distance (M c)</h3>
-<p>The input impedance at the soma is {zl.zin_soma_0Hz_MOhm.iloc[0]:.1f} MΩ. Along the target dendrite the
-local input impedance rises from {z(10):.0f} MΩ at 10 µm to {z(100):.0f} MΩ at 100 µm, {z(200):.0f} MΩ at
-200 µm and {z(400):.0f} MΩ at the 400 µm tip. The leak length constant of the thin grown dendrite is about
-{D['lam_um']:.0f} µm, so the 400 µm dendrite is about {400 / D['lam_um']:.1f} length constants long and ends in a
-sealed tip. Near the soma, synaptic current escapes quickly into the large, low-impedance soma; distally, it
-charges a small, isolated piece of membrane that discharges slowly. The short dendrite has a higher impedance
-at its 100 µm tip ({_at(zs, 'zin_0Hz_MOhm', 100):.0f} MΩ) than the long dendrite at the same distance, because
-it ends there.</p>
-
-<h3>3. Distally, the local EPSP is not much larger, but it lasts longer (M d, e)</h3>
-<p>In the passive dendrite, the peak of the local EPSP crosses −40 mV already at about {cross40:.0f} µm, then
-levels off near {plateau.mean():.0f} mV between 130 and 250 µm, because the membrane approaches the synaptic
-reversal potential (0 mV) and the driving force shrinks. The peak alone therefore cannot explain why events
-start only around 180–220 µm. What keeps growing is the duration: the time spent above −50 mV is
-{_at(el, 't_above_ms', 100):.1f} ms at 100 µm, {_at(el, 't_above_ms', 200):.1f} ms at 200 µm and
-{_at(el, 't_above_ms', 400):.1f} ms at 400 µm. Events appear where this time becomes comparable to
-τ<sub>m</sub> (about 8 ms).</p>
-
-<h3>4. A stronger synapse does not help near the soma; a longer one does (M f, g)</h3>
-<p>Scanning the synaptic weight from {min(mechanism.SCAN_WEIGHTS)} to {max(mechanism.SCAN_WEIGHTS)} nS, no
-synapse at {', '.join(f'{d:g}' for d in fail)} µm triggers an event, even at 8× the default strength. From
-{ok.distance_um.min():g} µm onwards an event appears, with a threshold that falls from
-{ok.threshold_nS.iloc[0]:g} nS to {tmin:g} nS ({', '.join(f'{d:g}' for d in ok[ok.threshold_nS == tmin].distance_um)} µm).
-Larger conductances push the proximal EPSP towards the synaptic reversal potential, but that is not enough.
-In contrast,
-keeping the conductance at {cfg.syn_weight_uS * 1e3:g} nS but slowing its decay moves the onset towards the
-soma: {', '.join(f'τ<sub>decay</sub> {t:g} ms → {onset[t]:.0f} µm' for t in sorted(onset))}. This is the causal test
-that duration, not amplitude, gates the event. At the most proximal sites, even a 20 ms decay is not enough:
-there, the electrotonic load of the soma dominates.</p>
-
-<h3>5. The event is regenerative and ends by itself (M h, i)</h3>
-<p>At {site:g} µm, the passive local EPSP peaks at {n['v_syn'].max():.0f} mV and decays. With Ca<sub>LVA</sub>
-the membrane, after a short shoulder, depolarises again to {u['v_syn'].max():.0f} mV,
-{u['t'][k_ev] - on:.0f} ms after the synaptic input: this delay reflects the slow activation. m² rises close
-to 1, but h falls from {u['h'][0]:.2f} to {u['h'].min():.3f}, which ends the event. Recovery from inactivation
-takes tens of milliseconds (τ<sub>h</sub> ≈ {h_tau_rest:.0f} ms at rest), so in a 50 Hz train the channels
-are still inactivated when the next inputs arrive. This is why in trains only the first input triggers the
-event (figure set 3).</p>
-
-<h3>6. Where the channels are matters less than where the synapse is (Figure 1, M)</h3>
-<p>With equal peak densities, the onset (on a 20 µm grid) is
-{', '.join(f'{p} {pon[p]:.0f} µm' for p in pon)}. The <i>decreasing</i> profile has its highest density
-({cfg.g_peak:g} S/cm²) next to the soma, yet proximal synapses still fail: more channels do not overcome the
-load. With the hotspot ({lo:g}–{hi:g} µm), synapses at {', '.join(f'{d:g}' for d in hs_sites if d < lo or d > hi) or 'none'} µm,
-outside the hotspot, still trigger the event, because their depolarisation spreads into the channel-rich
-membrane; the event happens in the hotspot, not at the synapse.</p>
-
-<h3>7. Consequence at the soma</h3>
-<p>Without Ca<sub>LVA</sub>, a synapse at 300 µm gives a {_value(ref['none'], 'long', 300, 'peak_soma_mV'):.2f} mV
-somatic EPSP. With uniform Ca<sub>LVA</sub> it gives {uni_300:.2f} mV, as much as a passive synapse at about
-{equiv:.0f} µm. The dendritic event therefore compensates much of the distance-dependent attenuation for
-synapses beyond the onset, and does nothing for synapses closer in. Blocking Na<sup>+</sup> channels and
-somatic Ca<sub>LVA</sub> together (figure set 4) leaves these numbers almost unchanged: the event is carried by
-the dendritic Ca<sub>LVA</sub>, and single inputs stay below the somatic spike threshold.</p>
-
-<p class="meta"><b>Caveats.</b> These conclusions are for this model: the dendritic Ca<sub>LVA</sub> uses the
-kinetics of the model's somatic channel, and its dendritic density is an assumption, not a measurement. An
-event is counted when Ca<sub>LVA</sub> adds more than {mechanism.EVENT_CRITERION_MV:g} mV to the local EPSP.
-The threshold scan uses the uniform profile and the sites listed above; onsets are given on the scan grids
-(10–20 µm).{ttx}</p>
-<figure>{fig}<figcaption><b>Figure M.</b> <b>a</b>, Steady-state activation (m∞²) and availability (h∞) of
-Ca<sub>LVA</sub>; dotted line: resting potential. <b>b</b>, Activation and inactivation time constants.
-<b>c</b>, Local input impedance (0 Hz) along the target dendrite in the passive cell; dotted line: soma.
-<b>d, e</b>, Peak and time above −50 mV of the local EPSP without dendritic Ca<sub>LVA</sub>
-({cfg.syn_weight_uS * 1e3:g} nS). <b>f</b>, Smallest synaptic weight that triggers an event (uniform
-Ca<sub>LVA</sub>); triangles: no event up to {max(mechanism.SCAN_WEIGHTS)} nS; dotted line: default weight.
-<b>g</b>, Extra local depolarisation caused by Ca<sub>LVA</sub> for synaptic decay time constants of
-{', '.join(f'{t:g}' for t in sorted(D['tau']))} ms; dotted line: event criterion. <b>h</b>, Local membrane
-potential at {site:g} µm with and without Ca<sub>LVA</sub>. <b>i</b>, Ca<sub>LVA</sub> gates at the same site:
-fast activation (m²), slow inactivation (h), and their product, the open probability (normalised).
-</figcaption></figure>"""
+<h2 id='design'>Design and methods in brief</h2>
+<p><b>Model.</b> Human L2/3 PV+ interneuron (HL23PV) of Yao <i>et al.</i> (2022), translated to Python with
+unchanged parameters; dendrites passive with I<sub>h</sub>. <b>Morphologies.</b> <i>Short</i>: the original
+reconstruction, target dendrite ending {meta['short']['tip_distance_um']:.1f} µm from the soma. <i>Long</i>: the
+same dendrite grown to {meta['long']['tip_distance_um']:.0f} µm (random walk, constant tip diameter).</p>
+<div class='tablewrap'><table><thead><tr><th>Factor</th><th style='text-align:left'>Levels</th></tr></thead><tbody>
+<tr><td>Dendritic Ca<sub>LVA</sub> profile (long cell only)</td><td style='text-align:left'>none;
+{', '.join(F['profiles'])} (uniform: g everywhere; increasing: 0 at the soma, g at {cfg.gradient_span_um / 2:g} µm,
+2g at the tip)</td></tr>
+<tr><td>Density g</td><td style='text-align:left'>{', '.join(f'{g:g}' for g in F['g_ca_mS_cm2'])} mS/cm²</td></tr>
+<tr><td>Ca<sub>LVA</sub> activation</td><td style='text-align:left'>original kinetics (half-activation of the m gate
+−40 mV); shifted by −15 mV (−55 mV), inactivation unchanged</td></tr>
+<tr><td>Proximal diameter (“mouth”)</td><td style='text-align:left'>original; ×{max(F['mouth_scale']):g} at the soma,
+fading to ×1 at {cfg.mouth_length_um:g} µm</td></tr>
+<tr><td>Input</td><td style='text-align:left'>one Exp2Syn synapse ({cfg.syn_weight_uS * 1e3:g} nS, τ
+{cfg.syn_tau1_ms:g}/{cfg.syn_tau2_ms:g} ms) at a time, every {cfg.site_step_um:g} µm; single event or 5 events
+at 50 Hz</td></tr>
+<tr><td>Somatic current</td><td style='text-align:left'>none; steady bias at 50 or 95% of rheobase; mean
+(80% of rheobase) + Ornstein–Uhlenbeck noise</td></tr>
+</tbody></table></div>
+<p class='meta'>An event is counted when dendritic Ca<sub>LVA</sub> adds more than
+{mechanism.EVENT_CRITERION_MV:g} mV to the peak depolarisation at the synapse or at the tip of the dendrite (events
+triggered by proximal synapses start distally). {cfg.celsius:g} °C, dt {cfg.dt_ms:g} ms, segments ≤
+{cfg.max_seg_len_um:g} µm along the target dendrite, every run from the steady resting state.</p>"""
 
 
-def geometry_html(cells: dict) -> str:
-    """Table and figure: diameter, length and membrane area of each portion of the target dendrite."""
+def geometry_html(cells: dict, mouth_cell, mouth_length_um: float) -> str:
     short, long = cells["short"], cells["long"]
     rows_l = path_geometry(long, reference=short)
     in_short = {r["section"] for r in path_geometry(short)}
@@ -320,166 +191,130 @@ def geometry_html(cells: dict) -> str:
                   f"<td>{r['area_um2']:.0f}</td><td>{'✓' if r['section'] in in_short else '–'}</td><td>✓</td></tr>")
     a_s = sum(r["area_um2"] for r in path_geometry(short))
     a_l = sum(r["area_um2"] for r in rows_l)
-    soma = short.soma[0]
-    a_soma = sum(x.area() for x in soma)
-    a_basal = sum(x.area() for sec in short.basal for x in sec)
-    grown = [r for r in rows_l if r["portion"] == "grown extension"]
+    m0 = path_geometry(mouth_cell, reference=short)[0]
     table = ("<div class='tablewrap'><table><thead><tr><th>Section</th><th style='text-align:left'>Portion</th>"
              "<th>Path distance (µm)</th><th>Length (µm)</th><th>Diameter (µm), mean (range)</th>"
-             "<th>Membrane area (µm²)</th><th>short</th><th>long</th></tr></thead><tbody>"
-             + "".join(tr) +
+             "<th>Membrane area (µm²)</th><th>short</th><th>long</th></tr></thead><tbody>" + "".join(tr) +
              f"<tr><td><b>total</b></td><td></td><td></td><td>{short.tip_distance:.1f} / {long.tip_distance:.1f}</td>"
              f"<td></td><td>{a_s:.0f} / {a_l:.0f}</td><td></td><td></td></tr></tbody></table></div>")
-    text = (f"<p>All portions of the target dendrite are thin. The first section tapers from "
-            f"{rows_l[0]['diam_max_um']:.2f} µm at the soma to {rows_l[0]['diam_min_um']:.2f} µm at the first branch "
-            f"point; from {rows_l[1]['end_um']:.0f} µm onwards the diameter is {rows_l[2]['diam_min_um']:.2f}–"
-            f"{rows_l[2]['diam_max_um']:.2f} µm. The grown extension keeps the tip diameter "
-            f"({grown[0]['diam_mean_um']:.2f} µm) over its {grown[0]['length_um']:.1f} µm, so the long dendrite is a "
-            f"uniform thin cable beyond the original tip. Growing the dendrite adds {a_l - a_s:.0f} µm² of membrane: the "
-            f"target dendrite goes from {a_s:.0f} to {a_l:.0f} µm², compared with {a_soma:.0f} µm² for the soma "
-            f"({soma.diam:.1f} µm diameter) and {a_basal:.0f} µm² for the whole basal tree of the short cell. "
-            "Section boundaries are the branch points of the reconstruction; NEURON's import creates a new section "
-            "for the grown part, which is otherwise a direct continuation of the original tip.</p>")
-    fig = (f"<figure>{_svg(plotting.diameter_figure(cells))}<figcaption><b>Target dendrite geometry.</b> "
-           "<b>a</b>, Diameter along the target dendrite (reconstruction points) in the short (dashed) and long "
-           "(solid) cells, with every other soma-to-tip path of the cell in grey. Many other branches taper "
-           "gradually over hundreds of micrometres; the target dendrite reaches its final diameter within the first "
-           f"{rows_l[1]['end_um']:.0f} µm. Dotted line: original tip. <b>b</b>, Cumulative membrane area of the target "
-           "dendrite from the soma outwards; dotted line: soma membrane area.</figcaption></figure>")
-    return "<h3 id='geometry'>Diameters and membrane area of the target dendrite</h3>" + table + text + fig
+    fig = plotting.diameter_figure(cells, mouth_cell=mouth_cell)
+    return (f"<h3 id='geometry'>Diameters and membrane area of the target dendrite</h3>{table}"
+            f"<p>The target dendrite tapers from {rows_l[0]['diam_max_um']:.2f} µm at the soma to "
+            f"{rows_l[2]['diam_min_um']:.2f}–{rows_l[2]['diam_max_um']:.2f} µm beyond {rows_l[1]['end_um']:.0f} µm; "
+            f"the grown part keeps the tip diameter. With the wider mouth, the first section measures "
+            f"{m0['diam_max_um']:.2f} µm at the soma (instead of {rows_l[0]['diam_max_um']:.2f}) and the extra width "
+            f"fades to zero at {mouth_length_um:g} µm.</p>"
+            + _figure(fig, "<b>Target dendrite geometry.</b> <b>a</b>, Diameter along the target dendrite "
+                      "(reconstruction points): short (dashed), long (solid), long with the wider mouth "
+                      "(dash-dot); grey, every other soma-to-tip path. <b>b</b>, Cumulative membrane area; "
+                      "dotted line, soma.", "morphology/diameter"))
 
 
-def methods_html(cfg: Config) -> str:
-    meta = load_target_meta()
-    s, l = meta["short"], meta["long"]
-    g = l["growth"]
-    return f"""
-<p><b>Model.</b> Human L2/3 PV+ interneuron (HL23PV) of Yao <i>et al.</i> (2022), <i>Cell Reports</i> 38, 110232
-(doi:<a href="https://doi.org/10.1016/j.celrep.2021.110232">10.1016/j.celrep.2021.110232</a>), with the morphology,
-ion channels and parameters of the Zenodo release
-(doi:<a href="https://doi.org/10.5281/zenodo.5771000">10.5281/zenodo.5771000</a>), translated to Python.
-Dendrites are passive with I<sub>h</sub>; soma and axon carry the original active conductances.</p>
-<p><b>Morphologies.</b> <i>Short</i>: the original reconstruction; the target dendrite
-({' → '.join(s['path_sections'])}) ends {s['tip_distance_um']:.1f} µm from the soma (path distance from the
-soma centre). <i>Long</i>: the same cell with that tip grown by {g['added_um']:.1f} µm (random walk, {g['step_um']:g} µm
-steps, direction noise s.d. {g['jitter_sd']:g}, seed {g['seed']}, constant diameter {2 * g['radius_um']:.2f} µm), so
-that the tip lies {l['tip_distance_um']:.1f} µm from the soma. Everything else is identical.</p>
-<p><b>Dendritic Ca<sub>LVA</sub>.</b> Only on the target path of the long cell (0–400 µm), with CaDynamics
-(γ {cfg.cadyn_gamma:g}, τ {cfg.cadyn_decay_ms:.0f} ms). Profiles: none; uniform; hotspot
-({cfg.hotspot_width_um:g} µm wide, centred at {cfg.hotspot_center_um:g} µm); increasing and decreasing linear
-gradients over 0–{cfg.gradient_span_um:g} µm. The short dendrite never carries Ca channels.</p>
-<p><b>Input and simulation.</b> One Exp2Syn conductance synapse at a time, placed at the same absolute
-distances in both cells. {cfg.celsius:g} °C, dt {cfg.dt_ms:g} ms, segments ≤ {cfg.max_seg_len_um:g} µm along the
-target dendrite, each run started from the steady resting state.</p>"""
-
-
-def build(set_file=None, out=None, progress=None) -> Path:
-    set_file = Path(set_file or CONFIG_DIR / "figure_set.json")
-    out = Path(out or FIGURES_DIR / "report.html")
-    entries = json.loads(set_file.read_text())["figures"]
-    base = Config.from_json(CONFIG_DIR / entries[0]["base"])
-
-    toc, body = [], []
-    cells = {m: get_cell(m, base) for m in ("short", "long")}
-    body.append("<h2 id='morphology'>Morphologies</h2>")
-    body.append(f"<figure>{_svg(plotting.dendrogram_figure(cells))}<figcaption><b>Dendrograms.</b> Every "
-                "basal branch drawn at its path distance from the soma (x) and stacked by primary dendrite (y); "
-                "vertical lines are branch points. The target dendrite is highlighted. Top: short cell, the "
-                f"target dendrite ends at {cells['short'].tip_distance:.1f} µm. Bottom: long cell, the same "
-                f"dendrite continues from the original tip (tick) to {cells['long'].tip_distance:.1f} µm. All other "
-                "branches are identical; note that the longest original branch of the cell reaches "
-                f"{max(cells['short'].distance(s(1)) for s in cells['short'].dend):.0f} µm."
-                "</figcaption></figure>")
-    body.append(geometry_html(cells))
-    for stem, fig in (("dendrogram", plotting.dendrogram_figure(cells)),
-                      ("diameter", plotting.diameter_figure(cells))):
-        plotting.save_figure(fig, f"morphology/{stem}", formats=("pdf", "png"))
-        plt.close(fig)
+def morphology_html(cells, mouth_cell, mouth_length_um) -> str:
     fig3d = viewer3d.morphology_3d(cells["long"], cells["short"].tip_distance)
-    body.append("<figure>" + fig3d.to_html(full_html=False, include_plotlyjs=True,
-                                            config={"displaylogo": False})
-                + "<figcaption><b>Interactive 3D view</b> of the long cell. Drag to rotate, scroll to zoom, "
-                "double-click to reset. Black: the original target dendrite (the whole of it in the short cell); "
-                "blue: the grown extension. Click <i>grown extension</i> in the legend to hide it and see the "
-                "short cell. The reconstructed cell is nearly flat; the random-walk extension leaves that plane."
-                "</figcaption></figure>")
-    body.append(f"<details><summary>2D projection of both cells</summary><figure>"
-                f"{_svg(plotting.morphology_figure(cells))}<figcaption>Short (left) and long (right) cells "
-                "projected on the plane that best shows the target dendrite; circles every 50 µm."
-                "</figcaption></figure></details>")
-    toc.append("<li><a href='#morphology'>Morphologies</a></li>")
-    n_morph = len(body)
-
-    all_results = {}
-    for k, entry in enumerate(entries, 1):
-        cfg0 = Config.from_json(CONFIG_DIR / entry["base"]).replace(**entry.get("overrides", {}))
-        results = {}
-        for prof in entry["profiles"]:
-            cfg = cfg0.replace(name=f"{entry['name']}__{prof}", ca_profile=prof)
-            if progress:
-                progress(cfg.name)
-            results[prof] = load_or_run(cfg)
-        anchor = entry["name"]
-        all_results[anchor] = results
-        toc.append(f"<li><a href='#{anchor}'>{html.escape(anchor)}</a></li>")
-        body.append(f"<h2 id='{anchor}'>{k}. {html.escape(anchor)}</h2>")
-        body.append(f"<p class='meta'>{describe_html(cfg0)}</p>")
-        body.append(set_findings(results, entry.get("note", "")))
-        body.append(summary_table(results))
-        body.append(f"<figure>{_svg(plotting.comparison_figure(results))}"
-                    f"<figcaption><b>Figure {k}.</b> {CAPTION_COMPARISON}</figcaption></figure>")
-        for prof, res in results.items():
-            fig = plotting.overview_figure(res, {m: get_cell(m, res.config) for m in res.config.morphologies})
-            body.append(f"<details><summary>Detail: {prof}</summary><figure>{_svg(fig)}"
-                        f"<figcaption><b>Figure {k}–{prof}.</b> {CAPTION_OVERVIEW}</figcaption></figure></details>")
-        body.append(f"<p class='meta'>Reproduce: <code>python scripts/make_all_figures.py --only {anchor}</code></p>")
-
-    if progress:
-        progress("mechanism analyses")
-    D = mechanism.collect(base)
-    first = json.loads(set_file.read_text())["figures"][0]
-    ref = {p: load_or_run(Config.from_json(CONFIG_DIR / first["base"]).replace(
-        **first.get("overrides", {}), name=f"{first['name']}__{p}", ca_profile=p)) for p in first["profiles"]}
-    toc.insert(1, "<li><a href='#mechanism'>Mechanism: why only distal synapses trigger a Ca event</a></li>")
-    body.insert(n_morph, mechanism_html(D, ref))  # right after the morphology section
-    plotting.save_figure(plotting.mechanism_figure(D), "mechanism/mechanism", formats=("pdf", "png"))
-    fs = studies.figure_set(set_file)
-    study = None
-    if "bias_study" in fs:
-        study = studies.bias_study(set_file=set_file, progress=progress)
-        body.append(bias_html(study, fs["bias_study"]["example_site_um"]))
-        toc.append("<li><a href='#bias'>Firing near threshold: somatic bias current</a></li>")
-    body.append(manuscript.html(all_results, D, cells, base))
-    toc += ["<li><a href='#manuscript'>Draft manuscript material</a>: <a href='#ms-methods'>Methods</a> · "
-            "<a href='#ms-results'>Results</a> · <a href='#ms-legends'>Figure legends</a> · "
-            "<a href='#references'>References</a></li>"]
-
-    page = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PV dendrite report</title><style>{CSS}</style></head>
-<body><main>
-<h1>Short (100 µm) vs grown (400 µm) dendrite of a human PV+ interneuron</h1>
-<p class="meta">Generated {dt.datetime.now():%Y-%m-%d %H:%M} · pvdend {__version__} · NEURON {neuron.__version__}
-· figure set <code>{set_file.name}</code></p>
-{executive_html(all_results, D, study)}
-<nav><ol>{''.join(toc)}</ol></nav>
-<h2 id="methods">Methods in brief</h2>{methods_html(base)}
-{''.join(body)}
-<p class="ai">{AI_STATEMENT}</p>
-</main></body></html>"""
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(page)
-    return out
+    return ("<h2 id='morphology'>Morphologies</h2>"
+            + _figure(plotting.dendrogram_figure(cells),
+                      "<b>Dendrograms.</b> Every basal branch at its path distance from the soma; the target "
+                      f"dendrite is highlighted. Short cell: tip at {cells['short'].tip_distance:.1f} µm; long cell: "
+                      f"the same dendrite continues from the original tip (tick) to {cells['long'].tip_distance:.1f} µm.",
+                      "morphology/dendrogram")
+            + geometry_html(cells, mouth_cell, mouth_length_um)
+            + "<figure>" + fig3d.to_html(full_html=False, include_plotlyjs=True, config={"displaylogo": False})
+            + "<figcaption><b>Interactive 3D view</b> of the long cell: drag to rotate, scroll to zoom. Black: "
+              "original target dendrite; blue: grown extension (click it in the legend to hide it).</figcaption>"
+              "</figure>")
 
 
-# --- executive summary, firing study, AI statement -------------------------------------------------
+def electrotonic_html(cfg: Config, single: dict, mech_cfg: Config) -> str:
+    imp = {"short": mechanism.impedance_profile("short", cfg), "long": mechanism.impedance_profile("long", cfg),
+           "long, 1.5× mouth": mechanism.impedance_profile("long", cfg.replace(mouth_scale=1.5))}
+    none = {"short": single[(0.0, 1.0, 1.0)]["none"], "long": single[(0.0, 1.0, 1.0)]["none"],
+            "long, 1.5× mouth": single[(0.0, 1.0, 1.5)]["none"]}
+    ca = single[(mech_cfg.ca_act_shift_mV, mech_cfg.g_ca_mS_cm2, 1.0)][mech_cfg.ca_profile]
+    fig = plotting.electrotonic_figure(imp, none, ca, f"{mech_cfg.ca_profile}, {mech_cfg.g_ca_mS_cm2:g} mS/cm², "
+                                                     f"{SHIFT_TXT[mech_cfg.ca_act_shift_mV]}")
+    zl, zs = imp["long"], imp["short"]
+    z = lambda df, d, c="zin_0Hz_MOhm": float(df.iloc[int(np.argmin(np.abs(df.distance_um - d)))][c])  # noqa: E731
+    n = none["long"].summary.query("morphology == 'long'").set_index("site_um")
+    c = ca.summary.query("morphology == 'long'").set_index("site_um")
+    return f"""
+<h2 id='electrotonic'>Electrotonic structure and EPSP time course along the dendrite</h2>
+<ul>
+<li>The local input impedance rises from {z(zl, 10):.0f} MΩ at 10 µm to {z(zl, 100):.0f} MΩ at 100 µm and
+{z(zl, 400):.0f} MΩ at the long tip (soma: {zl.zin_soma_0Hz_MOhm.iloc[0]:.1f} MΩ); at 100 Hz it is lower and flatter.
+The short tip has {z(zs, 100):.0f} MΩ, higher than the long dendrite at the same distance, because it ends there.</li>
+<li>The transfer impedance to the soma falls only from {z(zl, 10, 'ztr_0Hz_MOhm'):.0f} to
+{z(zl, 400, 'ztr_0Hz_MOhm'):.0f} MΩ at 0 Hz, but much more steeply at 100 Hz: slow signals reach the soma much
+better than fast ones.</li>
+<li>Without Ca<sub>LVA</sub>, the local EPSP lasts longer the farther it is from the soma (effective time constant
+{n.tau_eff_ms_syn[10]:.1f} ms at 10 µm, {n.tau_eff_ms_syn[200]:.1f} ms at 200 µm, {n.tau_eff_ms_syn[400]:.1f} ms at
+400 µm), while the somatic EPSP is broadened by dendritic filtering ({n.tau_eff_ms_soma[10]:.1f} →
+{n.tau_eff_ms_soma[400]:.1f} ms). With Ca<sub>LVA</sub> ({mech_cfg.ca_profile}, {mech_cfg.g_ca_mS_cm2:g} mS/cm²,
+{SHIFT_TXT[mech_cfg.ca_act_shift_mV]}), the somatic EPSP integral at 300 µm rises from
+{n.area_mVms_soma[300]:.0f} to {c.area_mVms_soma[300]:.0f} mV·ms.</li>
+<li>The wider mouth lowers the impedance near the soma only (at 10 µm: {z(imp['long, 1.5× mouth'], 10):.0f} against
+{z(zl, 10):.0f} MΩ) and leaves the distal dendrite unchanged.</li>
+</ul>""" + _figure(fig, "<b>Electrotonic structure.</b> <b>a</b>, Local input impedance along the target dendrite "
+                        "(thick, 0 Hz; thin, 100 Hz; dotted, soma). <b>b</b>, Transfer impedance between each point and "
+                        "the soma. <b>c</b>, Steady-state voltage attenuation from each point to the soma. <b>d–f</b>, "
+                        "EPSP integral (log scale), effective time constant (integral / peak) and decay time constant "
+                        "(exponential fit between 80% and 20% of the peak) against synapse distance, at the soma (thick) "
+                        "and at the synapse (thin), without dendritic Ca<sub>LVA</sub> (grey and blue lines: short, long, "
+                        "long with wider mouth) and with it (colour).", "electrotonic/electrotonic")
 
-AI_STATEMENT = (
-    "<b>Use of AI tools.</b> Claude (Anthropic) was used as an AI programming assistant: to convert the original "
-    "HOC model code to Python, and to help write the simulation scripts, including the script that grows the "
-    "dendrite, as well as the figures and this report. The scientific questions, the choice of models and analyses, "
-    "and the interpretation of the results are the author's. The author takes full and sole responsibility "
-    "for all results and text.")
+
+def single_html(single: dict) -> str:
+    out = ["<h2 id='single'>Single synaptic events: density × kinetics × profile</h2>",
+           condition_table(single),
+           _figure(plotting.factorial_figure(single),
+                   "<b>Single events.</b> Columns: Ca<sub>LVA</sub> density and kinetics. <b>a–d</b>, Somatic EPSP "
+                   "against synapse distance: short cell (dashed grey), long cell without dendritic Ca<sub>LVA</sub> "
+                   "(dark grey), and with the uniform (blue) or increasing (green) profile. <b>e–h</b>, Extra local "
+                   "depolarisation due to Ca<sub>LVA</sub>; dotted line, event criterion.", "single/factorial")]
+    for (shift, g), res in ((k, single[(k[0], k[1], 1.0)]) for k in _keys(single)):
+        cells = {m: get_cell(m, res["none"].config) for m in ("short", "long")}
+        parts = []
+        for prof, r in res.items():
+            if prof == "none":
+                continue
+            parts.append(_figure(plotting.overview_figure(r, cells), plotting.describe(r.config).replace("$", ""),
+                                 f"single/overview_{prof}_g{g:g}_s{shift:g}"))
+        out.append(f"<details><summary>Detail: {g:g} mS/cm², {SHIFT_TXT[shift]} kinetics</summary>"
+                   + "".join(parts) + "</details>")
+    return "".join(out)
+
+
+def mouth_html(single: dict) -> str:
+    fig = plotting.mouth_figure(single)
+    if fig is None:
+        return ""
+    ch = []
+    for (shift, g) in _keys(single):
+        for prof in ("none", "uniform", "increasing"):
+            a = single[(shift, g, 1.0)][prof].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+            b = single[(shift, g, 1.5)][prof].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+            ch.append((100 * (b / a - 1)).values)
+    ch = np.concatenate(ch)
+    near = single[(0.0, 1.0, 1.0)]["none"].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+    near_w = single[(0.0, 1.0, 1.5)]["none"].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+    ev = {k: (_range(event_sites(single[(k[0], k[1], 1.0)], 'increasing')),
+              _range(event_sites(single[(k[0], k[1], 1.5)], 'increasing'))) for k in _keys(single)}
+    return (f"<h2 id='mouth'>A wider dendritic mouth</h2><ul>"
+            f"<li>Widening the first {single[(0.0, 1.0, 1.5)]['none'].config.mouth_length_um:g} µm of the target dendrite (×1.5 at the soma) changes somatic EPSPs by "
+            f"{ch.min():+.1f}% to {ch.max():+.1f}% across all sites and conditions; the largest change is for the most "
+            f"proximal synapses (10 µm: {near[10]:.2f} → {near_w[10]:.2f} mV without Ca<sub>LVA</sub>).</li>"
+            f"<li>The sites that trigger a Ca<sub>LVA</sub> event are unchanged (increasing profile: "
+            + "; ".join(f"{g:g} mS/cm² {SHIFT_TXT[s]}: {a} → {b}" for (s, g), (a, b) in ev.items()) + ").</li></ul>"
+            + _figure(fig, "<b>Wider mouth.</b> Relative change of the somatic EPSP with the 1.5× mouth, against "
+                           "synapse distance, for each density and kinetics.", "single/mouth"))
+
+
+def train_html(train: dict) -> str:
+    return ("<h2 id='train'>Trains of 5 inputs at 50 Hz</h2>"
+            + condition_table(train, unit="Largest somatic depolarisation (mV)")
+            + _figure(plotting.factorial_figure(train),
+                      "<b>Trains.</b> As the single-event figure, for 5 inputs at 50 Hz; amplitudes are the largest "
+                      "depolarisation during the train.", "train/factorial"))
 
 
 def _fired(res, morph="long"):
@@ -487,88 +322,212 @@ def _fired(res, morph="long"):
     return s[(s.morphology == morph) & (s.n_spikes_soma > 0)].site_um.tolist()
 
 
-def bias_html(study: dict, example_site_um: float) -> str:
+def bias_html(bias: dict, S: dict) -> str:
+    out = ["<h2 id='bias'>Firing with a steady somatic current</h2>"
+           f"<p class='meta'>{S['bias']['note']} Density {', '.join(f'{g:g}' for g in S['bias']['g_ca_mS_cm2'])} "
+           "mS/cm². Cells: synapse sites that make the cell fire at least one spike.</p>"]
+    for (shift, g), study in bias.items():
+        rows = []
+        for frac, res in sorted(study.items()):
+            sl = res["none"].summary.query("morphology == 'long'")
+            b = sl.bias_nA.iloc[0] if "bias_nA" in sl else 0.0
+            cells = "".join(f"<td>{_range(_fired(r)) if _fired(r) else 'none'}</td>" for r in res.values())
+            short_f = _fired(res["none"], "short")
+            rows.append(f"<tr><td>{100 * frac:.0f}%</td><td>{b:.3f}</td><td>{sl.vrest_soma_mV.iloc[0]:.1f}</td>"
+                        f"<td>{_range(short_f) if short_f else 'none'}</td>{cells}</tr>")
+        head = "".join(f"<th>long, {p}</th>" for p in next(iter(study.values())))
+        out.append(f"<h3>{g:g} mS/cm², {SHIFT_TXT[shift]} kinetics</h3>"
+                   "<div class='tablewrap'><table><thead><tr><th>Bias (of rheobase)</th><th>Bias (nA)</th>"
+                   f"<th>Rest (mV)</th><th>short</th>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
+        tag = f"g{g:g}_s{shift:g}"
+        out.append(_figure(plotting.spike_traces_figure(study, max(study)),
+                           f"<b>Action potentials evoked by single synapses</b> at {100 * max(study):.0f}% of rheobase "
+                           f"({g:g} mS/cm², {SHIFT_TXT[shift]} kinetics). Top, soma; bottom, synapse; synapses every 20 µm "
+                           "(colour: distance). Thick traces: the cell fires.", f"bias/spike_traces_{tag}"))
+        out.append("<details><summary>Spikes and Ca<sub>LVA</sub> boost for every bias level</summary>"
+                   + _figure(plotting.firing_figure(study, S["bias"]["example_site_um"]),
+                             "One row per bias level. Left, somatic potential for a synapse at "
+                             f"{S['bias']['example_site_um']:g} µm; middle, somatic spikes against synapse distance; "
+                             "right, local Ca<sub>LVA</sub> boost.", f"bias/firing_{tag}") + "</details>")
+    return "".join(out)
+
+
+def noise_html(df, examples, S: dict) -> str:
+    N = S["noise"]
+    ev = studies.evoked_probability(df)
+    base = df[df.site_um.isna()].groupby("condition", sort=False)
+    rate = (base.n_before.mean() / (N["window_ms"] / 1000)).round(1)
     rows = []
-    for frac, res in sorted(study.items()):
-        sl = res["none"].summary.query("morphology == 'long'")
-        b = sl.bias_nA.iloc[0] if "bias_nA" in sl else 0.0
-        cells = "".join(f"<td>{_range(_fired(r)) if _fired(r) else 'none'}</td>" for r in res.values())
-        rows.append(f"<tr><td>{100 * frac:.0f}%</td><td>{b:.3f}</td><td>{sl.vrest_soma_mV.iloc[0]:.1f}</td>"
-                    f"<td>{_range(_fired(res['none'], 'short')) if _fired(res['none'], 'short') else 'none'}</td>"
-                    f"{cells}</tr>")
-    profs = list(next(iter(study.values())))
-    head = "".join(f"<th>long, {p}</th>" for p in profs)
-    table = ("<div class='tablewrap'><table><thead><tr><th>Bias (of rheobase)</th><th>Bias (nA)</th>"
-             "<th>Rest (mV)</th><th>short</th>" + head + "</tr></thead><tbody>" + "".join(rows) +
-             "</tbody></table></div><p class='meta'>Cells: synapse sites (µm) that make the cell fire at least one "
-             "spike.</p>")
-    fig = plotting.firing_figure(study, example_site_um)
-    plotting.save_figure(fig, "bias/firing", formats=("pdf", "png"))
-    fig2 = plotting.spike_traces_figure(study, max(study))
-    plotting.save_figure(fig2, "bias/spike_traces", formats=("pdf", "png"))
-    return f"""
-<h2 id='bias'>Firing near threshold: somatic bias current</h2>
-<p class='meta'>TTX off, the cell is free to fire. A steady current at the soma, set to 0, 50% or 95% of each cell's
-rheobase (smallest 1 s current step that evokes a spike), is applied throughout the simulation; single events,
-5 nS, peak-normalised Ca<sub>LVA</sub> profiles as in set 1.</p>
-{table}
-<ul>
-<li>Without bias, no 5 nS synapse fires the cell. Stronger synapses (tested up to 120 nS at 10, 50, 100, 200, 300
-and 400 µm) fire it only from 10 µm, with or without dendritic Ca<sub>LVA</sub>.</li>
-<li>The bias depolarises the whole cell, dendrite included. Depolarisation inactivates Ca<sub>LVA</sub>, so the
-dendritic boost shrinks: at 300 µm, uniform Ca<sub>LVA</sub> raises the somatic EPSP to
-{_value(study[0.0]['uniform'], 'long', 300, 'peak_soma_mV'):.2f} mV without bias but only to
-{_value(study[0.5]['uniform'], 'long', 300, 'peak_soma_mV'):.2f} mV at 50%.</li>
-<li>At 95% of rheobase, synapses within 100 µm fire the cell in all conditions; only the increasing gradient, which
-concentrates channels distally, lets distal synapses fire it ({_range(_fired(study[0.95]['increasing']))} µm).</li>
-</ul>
-<figure>{_svg(fig2)}<figcaption><b>Action potentials evoked by single synapses</b> at
-{100 * max(study):.0f}% of rheobase. <b>Top</b>, somatic membrane potential; <b>bottom</b>, membrane potential at the
-synapse, for synapses every 20 µm along the target dendrite (colour: distance from the soma). Thick traces are the
-synapses that make the cell fire. Columns: short morphology; long morphology without dendritic Ca<sub>LVA</sub>, with
-uniform Ca<sub>LVA</sub>, and with the increasing gradient. With the increasing gradient, distal synapses first trigger
-the dendritic Ca<sub>LVA</sub> event (bottom), whose depolarisation spreads to the soma and fires the cell (top);
-without it, only the proximal synapses reach threshold.</figcaption></figure>
-<figure>{_svg(fig)}<figcaption><b>Firing near threshold.</b> One row per bias level. <b>Left</b>, somatic
-membrane potential for a synapse at {example_site_um:g} µm in the long morphology, without (dashed) and with uniform
-(blue) dendritic Ca<sub>LVA</sub>. <b>Middle</b>, number of somatic spikes against synapse distance (dashed, short
-morphology; colours, long morphology with each profile). <b>Right</b>, extra local depolarisation due to
-Ca<sub>LVA</sub>; dotted line, event criterion.</figcaption></figure>"""
+    for cond, grp in ev.groupby("condition", sort=False):
+        cells = "".join(f"<td>{_fmt(float(grp[grp.site_um == d].p_evoked.iloc[0]) if (grp.site_um == d).any() else np.nan)}</td>"
+                        for d in N["sites_um"])
+        rows.append(f"<tr><td>{cond.replace('Ca_LVA', 'Ca<sub>LVA</sub>')}</td><td>{rate.get(cond, np.nan):.1f}</td>{cells}</tr>")
+    head = "".join(f"<th>{d:g}</th>" for d in N["sites_um"])
+    table = ("<div class='tablewrap'><table><thead><tr><th rowspan='2'>Condition</th><th rowspan='2'>Background "
+             f"rate (Hz)</th><th colspan='{len(N['sites_um'])}'>Evoked spike probability for a synapse at (µm)</th>"
+             f"</tr><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
+    ex_conds = [c for c in examples if "no Ca" in c] + [c for c in examples if "increasing, shifted" in c]
+    fig = plotting.noise_figure(df, examples, ev, ex_conds[:2], N["example_site_um"], N)
+    return (f"<h2 id='noise'>Firing with a noisy somatic current</h2><p class='meta'>{N['note']} Mean "
+            f"{100 * N['mu_frac']:.0f}% and s.d. {100 * N['sigma_frac']:.0f}% of each cell's rheobase, correlation time "
+            f"{N['tau_ms']:g} ms; {N['n_trials']} paired trials per site; evoked probability = P(spike within "
+            f"{N['window_ms']:g} ms of the input | synapse) − P(same window | no synapse); Ca<sub>LVA</sub> "
+            f"{N['g_ca_mS_cm2']:g} mS/cm².</p>" + table
+            + _figure(fig, "<b>Noisy somatic current.</b> <b>a, b</b>, Somatic potential in three trials with the same "
+                           "noise, without (grey) and with (blue) a synapse at "
+                           f"{N['example_site_um']:g} µm; dotted line, synaptic input. <b>c</b>, Spike probability added "
+                           "by the synapse against its distance. <b>d</b>, Median latency of the first spike after the "
+                           "input.", "noise/noise"))
 
 
-def executive_html(R: dict, D: dict, study: dict | None) -> str:
-    sp, st = R["single_peak"], R["single_total"]
-    n = sp["none"]
-    ev = lambda res, p: event_sites(res, p)  # noqa: E731
-    u300, n300 = _value(sp["uniform"], "long", 300, "peak_soma_mV"), _value(n, "long", 300, "peak_soma_mV")
+def _threshold_sentence(th) -> str:
+    fail = th[th.threshold_nS.isna()].distance_um
+    ok = th[th.threshold_nS.notna()].sort_values("distance_um")
+    parts = []
+    if len(fail):
+        parts.append(f"No synapse at {', '.join(f'{d:g}' for d in fail)} µm triggers an event up to "
+                     f"{max(mechanism.SCAN_WEIGHTS)} nS")
+    if len(ok):
+        near, far = ok.iloc[0], ok.iloc[-1]
+        parts.append(f"the smallest synaptic weight that triggers one rises from {far.threshold_nS:g} nS at "
+                     f"{far.distance_um:g} µm to {near.threshold_nS:g} nS at {near.distance_um:g} µm")
+    s = "; ".join(parts)
+    return s[0].upper() + s[1:] if s else ""
+
+
+def mechanism_html(D: dict) -> str:
+    cfg = D["cfg"]
+    th = D["thresholds"]
     onset = {t: mechanism.onset_um(df) for t, df in D["tau"].items()}
+    el = D["epsp"]["long"]
+    t_above = lambda d: float(el.iloc[int(np.argmin(np.abs(el.distance_um - d)))].t_above_ms)  # noqa: E731
+    u, n = D["example"][cfg.ca_profile], D["example"]["none"]
+    gv = D["gating"]
+    tm = gv[(gv.v >= -70) & (gv.v <= -50)].m_tau
+    half = float(gv.v[np.argmin(np.abs(gv.m_inf - 0.5))])
+    k = int(np.argmax(u["v_syn"]))
+    cond = f"{cfg.ca_profile}, {cfg.g_ca_mS_cm2:g} mS/cm², {SHIFT_TXT[cfg.ca_act_shift_mV]} kinetics"
+    return f"""
+<h2 id="mechanism">Mechanism: what decides which synapses trigger a Ca<sub>LVA</sub> event</h2>
+<p class='meta'>Analyses for the condition with robust events: {cond}.</p>
+<ol>
+<li><b>The channel is slow and mostly inactivated at rest.</b> The m gate is half-activated at {half:.0f} mV, with a
+time constant of {tm.min():.1f}–{tm.max():.1f} ms between −70 and −50 mV; at rest ({D['rest_mV']:.1f} mV) only
+{100 * D['h_rest']:.0f}% of the channels are available (M a, b).</li>
+<li><b>The soma is a strong current sink; distally the dendrite is isolated</b> (M c), so the passive local EPSP lasts
+longer with distance: {t_above(100):.1f} ms above −50 mV at 100 µm, {t_above(200):.1f} ms at 200 µm and
+{t_above(400):.1f} ms at 400 µm, while its peak levels off (M d, e).</li>
+<li><b>Proximal synapses need much stronger, or longer, input.</b> An event is counted when Ca<sub>LVA</sub> adds
+more than {mechanism.EVENT_CRITERION_MV:g} mV at the synapse or at the tip. {_threshold_sentence(th)} (M f).
+Slowing the synaptic decay moves the onset towards the soma:
+{', '.join(f'τ<sub>decay</sub> {t:g} ms → {onset[t]:.0f} µm' for t in sorted(onset))} (M g).</li>
+<li><b>The event is regenerative and self-terminating.</b> At {D['example_site']:g} µm the passive local EPSP peaks at
+{n['v_syn'].max():.0f} mV; with Ca<sub>LVA</sub> the membrane reaches {u['v_syn'].max():.0f} mV
+{u['t'][k] - cfg.onset_ms:.0f} ms after the input, and the inactivation gate falls from {u['h'][0]:.2f} to
+{u['h'].min():.3f} (M h, i).</li>
+</ol>""" + _figure(plotting.mechanism_figure(D),
+                   "<b>Figure M.</b> <b>a</b>, Steady-state activation (m∞², dashed: original kinetics) and "
+                   "availability (h∞); dotted line, rest. <b>b</b>, Time constants. <b>c</b>, Local input impedance. "
+                   "<b>d, e</b>, Peak and time above −50 mV of the passive local EPSP. <b>f</b>, Smallest synaptic weight "
+                   "that triggers an event (triangles: none up to the largest weight tested). <b>g</b>, Local boost for "
+                   "different synaptic decay time constants. <b>h</b>, Local potential with and without "
+                   "Ca<sub>LVA</sub>; <b>i</b>, gates.", "mechanism/mechanism")
+
+
+# --- summary --------------------------------------------------------------------------------------
+
+def executive_html(single, train, bias, noise_ev, D, S) -> str:
+    n = single[(0.0, 1.0, 1.0)]["none"]
     items = [
-        f"<b>A longer dendrite loses its distal inputs.</b> Growing the dendrite from 100 to 400 µm, a synapse at "
-        f"the new tip moves the soma by only {_value(n, 'long', 400, 'peak_soma_mV'):.2f} mV, against "
-        f"{_value(n, 'long', 10, 'peak_soma_mV'):.1f} mV near the soma; the shared proximal part is also slightly "
-        f"weakened ({_value(n, 'short', 100, 'peak_soma_mV'):.2f} → {_value(n, 'long', 100, 'peak_soma_mV'):.2f} mV at "
-        f"100 µm).",
-        f"<b>Dendritic Ca<sub>LVA</sub> rescues distal synapses, all or none.</b> Synapses beyond about "
-        f"{min(ev(sp, 'uniform')):.0f} µm trigger a regenerative Ca<sub>LVA</sub> event that raises their somatic "
-        f"effect about {u300 / n300:.1f}-fold (at 300 µm: {n300:.2f} → {u300:.2f} mV), as large as a passive "
-        f"synapse close to the soma; proximal synapses never trigger it.",
-        f"<b>Duration, not amplitude, decides.</b> Ca<sub>LVA</sub> opens slowly. Near the soma the local EPSP is too "
-        f"brief, and no synaptic strength up to {max(mechanism.SCAN_WEIGHTS)} nS helps; a slower synaptic decay moves "
-        f"the onset from {onset[min(onset)]:.0f} to {onset[max(onset)]:.0f} µm.",
-        f"<b>Where the channels are matters less than where the synapse is.</b> With the same total amount of "
-        f"channels, the decreasing gradient (channels near the soma) produces "
-        f"{'no event at all' if not ev(st, 'decreasing') else 'events at ' + _range(ev(st, 'decreasing')) + ' µm'}; "
-        f"distal channels boost the most synapses.",
-        "<b>Trains: one event per burst.</b> In a 50 Hz train the event occurs once; the channels stay inactivated "
-        "for the following inputs.",
-    ]
-    if study is not None:
-        items.append(
-            f"<b>Firing: depolarisation switches the boost off.</b> At rest, a single synapse fires the cell only "
-            f"from right next to the soma, even at 120 nS. A somatic bias towards threshold depolarises the dendrite and inactivates Ca<sub>LVA</sub>; "
-            f"at 95% of rheobase only distally concentrated channels (increasing gradient) let distal synapses fire "
-            f"the cell ({_range(_fired(study[0.95]['increasing']))} µm).")
-    items.append("<b>TTX is irrelevant here.</b> The dendrite has no Na<sup>+</sup> channels and single inputs stay "
-                 "below threshold, so blocking Na<sup>+</sup> channels changes nothing.")
+        f"<b>A longer dendrite loses its distal inputs.</b> Without Ca<sub>LVA</sub>, a synapse at the 400 µm tip moves "
+        f"the soma by {_value(n, 'long', 400, 'peak_soma_mV'):.2f} mV, against {_value(n, 'long', 10, 'peak_soma_mV'):.1f} "
+        f"mV near the soma; local impedance rises steeply with distance and the local EPSP lasts longer."]
+    for (shift, g) in _keys(single):
+        res = single[(shift, g, 1.0)]
+        parts = []
+        for prof in ("uniform", "increasing"):
+            sites = event_sites(res, prof)
+            s300 = _value(res[prof], "long", 300, "peak_soma_mV")
+            parts.append(f"{prof}: {'events at ' + _range(sites) + ' µm' if sites else 'no event'} "
+                         f"(soma at 300 µm {s300:.2f} mV)")
+        items.append(f"<b>{g:g} mS/cm², {SHIFT_TXT[shift]} kinetics</b>: " + "; ".join(parts) +
+                     f"; no Ca: {_value(n, 'long', 300, 'peak_soma_mV'):.2f} mV.")
+    near = {(s, g, p): nearest_boosted(single[(s, g, 1.0)], p) for s, g in _keys(single) for p in ("uniform", "increasing")}
+    shifted_ev = [d for s, g in _keys(single) if s != 0 for p in ("uniform", "increasing")
+                  for d in event_sites(single[(s, g, 1.0)], p)]
+    shifted_min = min(shifted_ev) if shifted_ev else np.nan
+    items.append("<b>The closest synapses are never boosted; how close the boost reaches depends on the channel.</b> "
+                 "Nearest synapse whose somatic EPSP grows by more than 10%: "
+                 + "; ".join(f"{g:g} mS/cm² {SHIFT_TXT[s]}, {p}: {_fmt(d, 0)} µm" for (s, g, p), d in near.items())
+                 + f". With shifted activation, synapses as close as {_fmt(shifted_min, 0)} µm trigger an event, which "
+                   "then starts in the distal dendrite rather than at the synapse.")
+    items.append("<b>The wider mouth is almost irrelevant</b>: it strengthens proximal synapses by a few percent and "
+                 "does not change where events occur.")
+    for (shift, g), study in bias.items():
+        hi = max(study)
+        fired = {p: _fired(r) for p, r in study[hi].items()}
+        items.append(f"<b>Near threshold ({100 * hi:.0f}% of rheobase), {g:g} mS/cm², {SHIFT_TXT[shift]} kinetics</b>: "
+                     "synapses that fire the cell are at "
+                     + ", ".join(f"{_range(v) if v else 'none'} µm ({p})" for p, v in fired.items()) + ".")
+    if noise_ev is not None:
+        n_tr = S["noise"]["n_trials"]
+        mid = noise_ev[(noise_ev.site_um >= 150) & (noise_ev.site_um <= 250)].groupby("condition", sort=False).p_evoked.mean()
+        items.append(f"<b>With a noisy somatic current</b> (mean {100 * S['noise']['mu_frac']:.0f}% of rheobase), single "
+                     "synapses add few spikes; for synapses at 150–250 µm the extra spike probability is "
+                     + ", ".join(f"{v:.2f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c, v in mid.items())
+                     + f". Only shifted-activation Ca<sub>LVA</sub> raises it, consistent with the mean depolarisation "
+                       f"inactivating the channel. Preliminary: {n_tr} trials per site, one trial = {1 / n_tr:.2f}.")
     return ("<section class='exec'><h2 id='summary'>Key results</h2><ol>" + "".join(f"<li>{i}</li>" for i in items)
             + "</ol></section>")
+
+
+# --- build ----------------------------------------------------------------------------------------
+
+def build(set_file=None, out=None, progress=None, write_html=True) -> Path:
+    S = studies.spec(set_file)
+    out = Path(out or FIGURES_DIR / "report.html")
+    cfg = studies.base_config(S)
+    M = S["mechanism"]
+    mech_cfg = cfg.replace(name="mechanism", ca_profile=M["profile"], g_ca_mS_cm2=M["g_ca_mS_cm2"],
+                           ca_act_shift_mV=M["ca_act_shift_mV"])
+
+    single = studies.grid("single", S, progress)
+    train = studies.grid("train", S, progress)
+    bias = studies.bias_grid(S, progress)
+    noise_df, noise_ex = studies.noise_study(S, progress)
+    if progress:
+        progress("mechanism analyses")
+    D = mechanism.collect(mech_cfg)
+
+    cells = {m: get_cell(m, cfg) for m in ("short", "long")}
+    mouth_cell = get_cell("long", cfg.replace(mouth_scale=max(S["factors"]["mouth_scale"])))
+    sections = [
+        ("design", "Design and methods in brief", design_html(S, cfg)),
+        ("morphology", "Morphologies", morphology_html(cells, mouth_cell, cfg.mouth_length_um)),
+        ("electrotonic", "Electrotonic structure and EPSP time course", electrotonic_html(cfg, single, mech_cfg)),
+        ("single", "Single synaptic events", single_html(single)),
+        ("mouth", "A wider dendritic mouth", mouth_html(single)),
+        ("mechanism", "Mechanism", mechanism_html(D)),
+        ("train", "Trains", train_html(train)),
+        ("bias", "Firing with a steady somatic current", bias_html(bias, S)),
+        ("noise", "Firing with a noisy somatic current", noise_html(noise_df, noise_ex, S)),
+        ("manuscript", "Draft manuscript material",
+         manuscript.html(single, train, bias, studies.evoked_probability(noise_df), D, cells, cfg, S)),
+    ]
+    toc = "".join(f"<li><a href='#{a}'>{t}</a></li>" for a, t, _ in sections)
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PV dendrite report</title><style>{CSS}</style></head>
+<body><main>
+<h1>Short (100 µm) vs grown (400 µm) dendrite of a human PV+ interneuron</h1>
+<p class="meta">Generated {dt.datetime.now():%Y-%m-%d %H:%M} · pvdend {__version__} · NEURON {neuron.__version__}
+· studies <code>configs/studies.json</code></p>
+{executive_html(single, train, bias, studies.evoked_probability(noise_df), D, S)}
+<nav><ol>{toc}</ol></nav>
+{''.join(body for _, _, body in sections)}
+<p class="ai">{AI_STATEMENT}</p>
+</main></body></html>"""
+    if write_html:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(page)
+    return out

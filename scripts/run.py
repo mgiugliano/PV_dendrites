@@ -1,7 +1,7 @@
 """Run one sweep from a JSON config, save results/ and an overview figure.
 
     python scripts/run.py configs/default.json
-    python scripts/run.py configs/default.json --set ca_profile=hotspot hotspot_center_um=300
+    python scripts/run.py configs/default.json --set ca_profile=increasing g_ca_mS_cm2=2.5 ca_act_shift_mV=-15
 """
 import argparse
 import json

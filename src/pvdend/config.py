@@ -9,8 +9,7 @@ import json
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-CA_PROFILES = ("none", "uniform", "hotspot", "increasing", "decreasing")
-CA_NORMS = ("peak", "total")
+CA_PROFILES = ("none", "uniform", "increasing")
 MORPHOLOGIES = ("short", "long")
 
 # Somatic Ca_LVA density and CaDynamics parameters of the original model
@@ -28,16 +27,14 @@ class Config:
     # --- morphology ---------------------------------------------------------
     prune_side_branches: bool = False  # remove branches leaving the target path
     max_seg_len_um: float = 2.0  # spatial resolution along the target path
+    mouth_scale: float = 1.0  # diameter factor at the soma end of the target dendrite (1: original)
+    mouth_length_um: float = 13.0  # extra width fades linearly to 1x over this distance from the soma
 
     # --- dendritic Ca_LVA (target path of the 'long' morphology only) ---------
     ca_profile: str = "none"  # one of CA_PROFILES
-    ca_norm: str = "peak"  # 'peak': use g_uniform / g_peak; 'total': equal total conductance
-    g_uniform: float = 0.005  # S/cm2, uniform density ('peak' normalisation)
-    g_peak: float = 0.015  # S/cm2, peak of hotspot and gradients ('peak' normalisation)
-    g_total_equiv: float = 0.005  # S/cm2, uniform-equivalent density ('total' normalisation)
-    hotspot_center_um: float = 250.0
-    hotspot_width_um: float = 100.0
-    gradient_span_um: float = 400.0  # gradients go 0 <-> g_peak over 0..span
+    g_ca_mS_cm2: float = 1.0  # uniform density, and density of 'increasing' at the midpoint span/2
+    gradient_span_um: float = 400.0  # 'increasing' goes from 0 at the soma to 2 g at span
+    ca_act_shift_mV: float = 0.0  # shift of the dendritic Ca_LVA activation gate (negative: activates earlier)
     cadyn_gamma: float = SOMA_CADYN_GAMMA
     cadyn_decay_ms: float = SOMA_CADYN_DECAY
 
@@ -71,8 +68,8 @@ class Config:
     def __post_init__(self):
         if self.ca_profile not in CA_PROFILES:
             raise ValueError(f"ca_profile must be one of {CA_PROFILES}")
-        if self.ca_norm not in CA_NORMS:
-            raise ValueError(f"ca_norm must be one of {CA_NORMS}")
+        if self.mouth_scale <= 0 or self.mouth_length_um <= 0:
+            raise ValueError("mouth_scale and mouth_length_um must be positive")
         for m in self.morphologies:
             if m not in MORPHOLOGIES:
                 raise ValueError(f"morphologies must be a subset of {MORPHOLOGIES}")

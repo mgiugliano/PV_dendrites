@@ -45,29 +45,30 @@ parameter against the original HOC file.
   `scripts/make_morphology.py` and `morphologies/target_dendrite.json`.
 * **Distances** are path distances from the centre of the soma, `soma[0](0.5)`.
 * **Dendritic Ca<sub>LVA</sub>** (with `CaDynamics`, using the somatic γ and decay values) is placed only on the
-  target path of the long cell, from 0 to 400 µm:
+  target path of the long cell, from 0 to 400 µm, with density g = `g_ca_mS_cm2`:
 
   | `ca_profile` | g(d) |
   |---|---|
   | `none` | 0 (passive dendrite, as in the original model) |
   | `uniform` | g |
-  | `hotspot` | g within `hotspot_center_um ± hotspot_width_um/2`, 0 elsewhere |
-  | `increasing` | g · d / `gradient_span_um` (rises from 0 at the soma to g at 400 µm) |
-  | `decreasing` | g · (1 − d / `gradient_span_um`) |
+  | `increasing` | 2g · d / `gradient_span_um` (0 at the soma, g at the midpoint, 2g at 400 µm) |
 
-  With `ca_norm = "peak"`, g is `g_uniform` (0.005 S/cm²) for `uniform` and `g_peak`
-  (0.015 S/cm²) for the others. With `ca_norm = "total"`, every profile is scaled to carry
-  the same total conductance (Σ g·area) as a uniform `g_total_equiv` (0.005 S/cm²), so
-  profiles differ only in where the channels are.
-* **Switches** (both cells): `somatic_ca_lva` (somatic Ca<sub>LVA</sub> on/off; *soma only* is
-  `ca_profile = "none"` with this on) and `ttx` (NaTg and Nap set to 0 everywhere).
+  The two profiles carry about the same total conductance. The dendrite uses `mod/Ca_LVA_dend.mod`, a copy of
+  the model's `Ca_LVA.mod` whose activation gate can be shifted (`ca_act_shift_mV`; −15 mV moves the
+  half-activation of m from −40 to −55 mV, inactivation unchanged). With no shift it is identical to the original.
+* **Wider mouth**: `mouth_scale` multiplies the diameter of the target dendrite at the soma, fading linearly back
+  to ×1 at `mouth_length_um` (13 µm, the second branch point).
+* **Switches** (both cells): `somatic_ca_lva` (somatic Ca<sub>LVA</sub> on/off), `ttx` (NaTg and Nap set to 0
+  everywhere), and `soma_bias_frac` (steady somatic current as a fraction of the cell's rheobase).
 * **Input**: one `Exp2Syn` conductance synapse (τ<sub>rise</sub> 0.3 ms, τ<sub>decay</sub> 3 ms, E 0 mV,
   5 nS). It is activated by a single event or a regular train (`n_events`, `freq_hz`). The synapse is placed in turn at
   every `site_step_um` (10 µm by default) along the target dendrite, at the same absolute
   distances in both cells (10–100 µm short, 10–400 µm long), one simulation per site.
+* **Noisy current**: `studies.noise_study` drives the soma with a mean current plus Ornstein–Uhlenbeck noise
+  (fractions of rheobase) and measures the spike probability each synapse adds, with paired noise realisations.
 * **Recorded**: membrane potential at the soma, at the synapse and at the tip; local [Ca²⁺]ᵢ and I<sub>Ca</sub>.
-  Measured: somatic and local EPSP amplitude, attenuation, rise time, half-width, latency,
-  area, train summation, somatic spikes, and local Δ[Ca²⁺]ᵢ.
+  Measured: somatic and local EPSP amplitude, attenuation, rise time, half-width, latency, EPSP integral,
+  effective and decay time constants, train summation, somatic spikes, and local Δ[Ca²⁺]ᵢ.
 * **Numerics**: 34 °C, dt 0.025 ms. The cell is brought to its resting state before each run.
   Segments are at most 2 µm long along the target dendrite (`max_seg_len_um`); everywhere else they follow
   the original rule, `nseg = 1 + 2·int(L/40)`.
@@ -100,8 +101,8 @@ Command line:
 
 ```bash
 .venv/bin/python scripts/run.py configs/default.json                                # one sweep + overview figure
-.venv/bin/python scripts/run.py configs/default.json --set ca_profile=hotspot hotspot_center_um=300 name=hs300
-.venv/bin/python scripts/make_all_figures.py                                       # every figure in configs/figure_set.json
+.venv/bin/python scripts/run.py configs/default.json --set ca_profile=increasing g_ca_mS_cm2=2.5 ca_act_shift_mV=-15 name=incr_shift
+.venv/bin/python scripts/make_all_figures.py                                       # every study in configs/studies.json
 .venv/bin/python scripts/make_report.py                                            # all of them in one page, with explanations: figures/report.html
 .venv/bin/python -m pytest                                                         # tests
 ```
@@ -115,7 +116,7 @@ functions, so a figure explored interactively and the one in a paper come from t
 ```python
 from pvdend import Config, run_sweep, get_cell, plotting
 
-cfg = Config(name="demo", ca_profile="increasing", ca_norm="total", n_events=5, freq_hz=50)
+cfg = Config(name="demo", ca_profile="increasing", g_ca_mS_cm2=2.5, ca_act_shift_mV=-15, n_events=5, freq_hz=50)
 res = run_sweep(cfg)            # res.summary: pandas DataFrame, res.traces: numpy arrays
 res.save()                      # results/demo/{config.json, summary.csv, traces.npz, ca_profile_*.csv}
 fig = plotting.overview_figure(res, {m: get_cell(m, cfg) for m in cfg.morphologies})
@@ -135,6 +136,7 @@ src/pvdend/
   cell.py               PVCell: Python translation of the HOC model
   morphology.py         target dendrite, path distances, tip growth
   calcium.py            dendritic Ca_LVA profiles, somatic Ca_LVA switch, TTX
+  studies.py            the studies of the report (factorial grid, trains, bias, noise)
   protocols.py          synaptic sweep, recordings, measurements, saving/loading
   plotting.py           publication figures (used by scripts and notebook)
   viewer3d.py           interactive 3D view (plotly): rotate, zoom, toggle the grown extension
@@ -143,7 +145,7 @@ src/pvdend/
   manuscript.py         draft Methods, Results, figure legends and references (numbers filled in from the data)
   gui.py                ipywidgets explorer for the notebook
 scripts/                make_morphology.py, run.py, make_all_figures.py, make_report.py
-configs/                default.json, figure_set.json (+ configs saved from the notebook)
+configs/                default.json, studies.json (+ configs saved from the notebook)
 notebooks/explore.ipynb interactive notebook (local and Colab)
 figures/                generated figures and report.html
 tests/                  pytest suite

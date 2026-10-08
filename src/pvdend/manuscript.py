@@ -16,9 +16,10 @@ import pandas
 import plotly
 
 from . import mechanism
-from .cell import ALL, AXONAL, SOMATIC
+from .cell import ALL, SOMATIC
 from .config import Config
 from .morphology import load_target_meta, path_geometry, side_branches
+from .protocols import RHEOBASE_STEP_MS
 
 REPO_URL = "https://github.com/mgiugliano/PV_dendrites"
 COLAB_URL = ("https://colab.research.google.com/github/mgiugliano/PV_dendrites/blob/main/"
@@ -96,37 +97,27 @@ def _v(res, morph, site, col):
 
 
 def _events(results, prof, crit=mechanism.EVENT_CRITERION_MV):
-    a = results[prof].summary.query("morphology == 'long'").set_index("site_um").peak_syn_mV
-    b = results["none"].summary.query("morphology == 'long'").set_index("site_um").peak_syn_mV
-    return [float(d) for d in (a - b)[(a - b) > crit].index]
+    a = results[prof].summary.query("morphology == 'long'").set_index("site_um")
+    b = results["none"].summary.query("morphology == 'long'").set_index("site_um")
+    x = np.maximum(a.peak_syn_mV - b.peak_syn_mV, a.peak_tip_mV - b.peak_tip_mV)
+    return [float(d) for d in x[x > crit].index]
 
 
 def _rng(sites):
-    return f"{min(sites):g}–{max(sites):g} µm" if sites else "no site"
+    if not sites:
+        return "no site"
+    return f"{min(sites):g} µm" if min(sites) == max(sites) else f"{min(sites):g}–{max(sites):g} µm"
 
 
-def _soma_range(res, sites):
-    long = res.summary[(res.summary.morphology == "long") & res.summary.site_um.isin(sites)]
-    return long.peak_soma_mV.min(), long.peak_soma_mV.max()
 
 
-def _event_peaks(res, site, where="v_syn"):
-    """Peak local depolarisation within each inter-event interval of a train."""
-    c = res.config
-    tr = res.traces[("long", site)]
-    t, v = tr["t"], tr[where]
-    base = v[t < c.onset_ms].mean()
-    return [float(v[(t >= c.onset_ms + i * c.interval_ms) & (t < c.onset_ms + (i + 1) * c.interval_ms)].max() - base)
-            for i in range(c.n_events)]
 
 
-def _n_sites(res, morph):
-    return int((res.summary.morphology == morph).sum())
 
 
 # --- Methods ------------------------------------------------------------------------------------
 
-def methods_html(cells: dict, cfg: Config, rest_mV: float) -> str:
+def methods_html(cells: dict, cfg: Config, rest_mV: float, S: dict, mech_cfg: Config) -> str:
     meta = load_target_meta()
     s_meta, l_meta = meta["short"], meta["long"]
     g = l_meta["growth"]
@@ -179,6 +170,12 @@ random-walk procedure used in our earlier simulations. Starting from the directi
 {sum(r['area_um2'] for r in geo) - sum(r['area_um2'] for r in path_geometry(short)):.0f} µm² of membrane
 (Supplementary Fig. S1). As a control, the code can also remove the side branches of the target dendrite in
 both morphologies; all results shown here keep them.</p>
+<p>To test the role of the proximal diameter, we also simulated both morphologies with a wider "mouth" of the
+target dendrite: we multiplied the diameter of each reconstruction point at distance d by
+1 + (s − 1)·max(1 − d/ℓ, 0), with s = {max(S['factors']['mouth_scale']):g} and ℓ = {cfg.mouth_length_um:g} µm, the
+distance of the second branch point, so that the diameter at the soma grows from {geo[0]['diam_max_um']:.2f} to
+{max(S['factors']['mouth_scale']) * geo[0]['diam_max_um']:.2f} µm while the taper and the rest of the dendrite are
+unchanged.</p>
 
 <h3>Spatial discretisation</h3>
 <p>To resolve synaptic sites spaced by 10 µm and the spatial profiles of channel density, we divided every
@@ -205,22 +202,31 @@ d[Ca<sup>2+</sup>]<sub>i</sub>/dt = −10<sup>4</sup> γ I<sub>Ca</sub> / (2 F d
 [Ca<sup>2+</sup>]<sub>min</sub>)/τ<sub>Ca</sub>, with γ = {cfg.cadyn_gamma:g}, τ<sub>Ca</sub> =
 {cfg.cadyn_decay_ms:.0f} ms (the somatic values) and [Ca<sup>2+</sup>]<sub>min</sub> = 100 nM. E<sub>Ca</sub>
 followed the Nernst equation with [Ca<sup>2+</sup>]<sub>o</sub> = 2 mM (about 131 mV at rest).</p>
-<p>We defined the channel density ḡ(d) as a function of the path distance d of each segment from the soma,
-over the whole target dendrite (0–{l_meta['tip_distance_um']:.0f} µm), for five profiles: <i>none</i>
-(ḡ = 0); <i>uniform</i> (ḡ = g); <i>hotspot</i> (ḡ = g for |d − {cfg.hotspot_center_um:g} µm| ≤
-{cfg.hotspot_width_um / 2:g} µm and 0 elsewhere); <i>increasing</i> (ḡ = g·min(d/L, 1)); and
-<i>decreasing</i> (ḡ = g·max(1 − d/L, 0)), with L = {cfg.gradient_span_um:g} µm. We set g in two ways. With
-<i>peak normalisation</i>, g = {cfg.g_uniform:g} S/cm² for the uniform profile and g = {cfg.g_peak:g} S/cm² for the
-other profiles, as in our earlier simulations. With <i>total normalisation</i>, we scaled each profile so that
-the total conductance on the dendrite, Σ<sub>i</sub> ḡ(d<sub>i</sub>) A<sub>i</sub> over all segments i of
-membrane area A<sub>i</sub>, equals that of a uniform density of {cfg.g_total_equiv:g} S/cm², so that profiles
-differ only in where the channels are. We note that these dendritic densities are model assumptions, not
-measurements.</p>
+<p>To test whether channels that activate at more negative potentials change the results, we also used a
+copy of this channel for the dendrite (<code>Ca_LVA_dend.mod</code>) in which only the activation gate is shifted:
+m<sub>∞</sub> and τ<sub>m</sub> are evaluated at V − ΔV, with ΔV = −15 mV, which moves the half-activation of
+m from −40 to −55 mV and leaves inactivation unchanged; with ΔV = 0 the copy reproduces the original channel
+exactly. The soma and the axon always kept the original channel.</p>
+<p>We defined the dendritic channel density ḡ(d) as a function of the path distance d of each segment from the
+soma, over the whole target dendrite (0–{l_meta['tip_distance_um']:.0f} µm), for two profiles: <i>uniform</i>
+(ḡ = g) and <i>increasing</i> (ḡ = 2g·min(d/L, 1), with L = {cfg.gradient_span_um:g} µm), which is zero at the
+soma, equals g at the midpoint ({cfg.gradient_span_um / 2:g} µm) and 2g at the tip, so that over the nearly
+cylindrical dendrite both profiles carry about the same total conductance. We used g =
+{' and '.join(f'{g:g}' for g in S['factors']['g_ca_mS_cm2'])} mS/cm². We note that these dendritic densities are
+model assumptions, not measurements.</p>
 
-<h3>Pharmacological manipulations</h3>
-<p>We mimicked TTX by setting the densities of NaTg and Nap to zero in all compartments, and we removed somatic
-Ca<sub>LVA</sub> by setting its somatic density to zero; both switches act identically in the two
-morphologies.</p>
+<h3>Somatic current injection</h3>
+<p>To let the cell fire, we injected current at the soma in two ways, always relative to the rheobase of each cell
+and condition, which we defined as the smallest {RHEOBASE_STEP_MS:g} ms current step that evokes a spike and determined by
+bisection (to 2 pA). First, a steady current of {', '.join(f'{100 * f:.0f}' for f in S['bias']['fractions'] if f)}%
+of rheobase, applied throughout the simulation including the initialisation, so that each run started from the new
+steady state. Second, a fluctuating current with mean {100 * S['noise']['mu_frac']:.0f}% of rheobase and an
+Ornstein–Uhlenbeck component of standard deviation {100 * S['noise']['sigma_frac']:.0f}% of rheobase and
+correlation time {S['noise']['tau_ms']:g} ms, which made the cell fire irregularly at a few Hz. For each synapse
+position we ran {S['noise']['n_trials']} trials with the synapse activated {S['noise']['warmup_ms']:g} ms after the
+start, and the same {S['noise']['n_trials']} noise realisations without the synapse; the evoked spike probability is
+the difference between the fractions of trials with at least one spike in the {S['noise']['window_ms']:g} ms after
+the input.</p>
 
 <h3>Synaptic input</h3>
 <p>We modelled an excitatory synapse as a conductance with a double-exponential time course (NEURON
@@ -249,8 +255,13 @@ as the ratio between somatic and local amplitudes, the EPSP area as the time int
 depolarisation, the 10–90% rise time and the half-width of single-event somatic EPSPs, and the local
 Δ[Ca<sup>2+</sup>]<sub>i</sub> as the peak increase of [Ca<sup>2+</sup>]<sub>i</sub>. We counted a dendritic
 <i>Ca<sub>LVA</sub> event</i> whenever Ca<sub>LVA</sub> added more than {mechanism.EVENT_CRITERION_MV:g} mV to the
-local EPSP peak, compared with the same synapse in the same morphology without dendritic Ca<sub>LVA</sub>, and we
-defined the onset distance as the most proximal site with an event.</p>
+peak depolarisation at the synapse or at the tip of the dendrite, compared with the same synapse in the same
+morphology without dendritic Ca<sub>LVA</sub> (the tip is included because events triggered by proximal synapses
+start in the distal dendrite), and we
+defined the onset distance as the most proximal site with an event. To describe the time course of the EPSP,
+both at the soma and at the synapse, we computed its integral above rest, an effective time constant equal to the
+integral divided by the peak, and a decay time constant from a log-linear fit of the falling phase between 80% and
+20% of the peak.</p>
 
 <h3>Mechanistic analyses</h3>
 <p>We computed the local input impedance along the target dendrite, and the transfer impedance to the soma, at
@@ -258,9 +269,11 @@ defined the onset distance as the most proximal site with an event.</p>
 (extended mode), in both morphologies without dendritic Ca<sub>LVA</sub>. We estimated the leak length constant
 of the grown dendrite as λ = (R<sub>m</sub> d / 4 R<sub>a</sub>)<sup>1/2</sup> {cite('rall1959')}, with
 R<sub>m</sub> = 1/g<sub>pas</sub>. We characterised the passive local EPSP by its peak and by the time it spends
-above −50 mV. To find the smallest synaptic weight that triggers an event, we scanned w over
+above −50 mV. For these analyses we used {mech_cfg.ca_profile} Ca<sub>LVA</sub> at {mech_cfg.g_ca_mS_cm2:g}
+mS/cm² with {'the original activation' if mech_cfg.ca_act_shift_mV == 0 else f'activation shifted by {mech_cfg.ca_act_shift_mV:g} mV'},
+the condition with the most robust events. To find the smallest synaptic weight that triggers an event, we scanned w over
 {', '.join(f'{x:g}' for x in mechanism.SCAN_WEIGHTS)} nS at {', '.join(f'{x:g}' for x in mechanism.SCAN_SITES)}
-µm, with uniform Ca<sub>LVA</sub>; to test the role of the EPSP duration, we varied τ<sub>2</sub> over
+µm; to test the role of the EPSP duration, we varied τ<sub>2</sub> over
 {', '.join(f'{x:g}' for x in mechanism.TAU2_VALUES)} ms at fixed w, at sites every 20 µm. For the gating
 analysis, we recorded m and h of Ca<sub>LVA</sub> at a synapse {mechanism.EXAMPLE_SITE:g} µm from the soma.</p>
 
@@ -278,215 +291,251 @@ Plotly {plotly.__version__}.</p>"""
 
 # --- Results ------------------------------------------------------------------------------------
 
-def results_html(R: dict, D: dict, cells: dict, cfg: Config) -> str:
-    sp, st, tr, tx = R["single_peak"], R["single_total"], R.get("train5x50Hz_peak"), R.get("single_peak_TTX_noSomaCa")
-    n = sp["none"]
+KIN = {0.0: "original", -15.0: "shifted"}
+
+
+def _cond(shift, g):
+    return f"{g:g} mS/cm² with {'the original' if shift == 0 else 'shifted'} activation"
+
+
+def _events_txt(res, prof):
+    ev = _events(res, prof)
+    return f"events for synapses at {_rng(ev)}" if ev else "no event at any site"
+
+
+def _boost(res, prof, site):
+    return _v(res[prof], "long", site, "peak_soma_mV") / _v(res["none"], "long", site, "peak_soma_mV")
+
+
+def _fmt0(d):
+    return "–" if d != d else f"{d:.0f}"
+
+
+def _distal_initiation(res) -> str:
+    """Sentence on events triggered by intermediate synapses but generated distally (from the tip boost)."""
+    if res is None:
+        return ""
+    a = res["uniform"].summary.query("morphology == 'long'").set_index("site_um")
+    b = res["none"].summary.query("morphology == 'long'").set_index("site_um")
+    loc, tip = a.peak_syn_mV - b.peak_syn_mV, a.peak_tip_mV - b.peak_tip_mV
+    sites = [d for d in loc.index if tip[d] > mechanism.EVENT_CRITERION_MV and loc[d] < 2]
+    if not sites:
+        return ""
+    d = sites[len(sites) // 2]
+    return (f"Interestingly, with shifted activation, synapses at {min(sites):g}–{max(sites):g} µm triggered events "
+            f"that were barely visible at the synapse but large at the tip: for a synapse at {d:g} µm, Ca<sub>LVA</sub> "
+            f"added {loc[d]:.1f} mV at the synapse and {tip[d]:.0f} mV at the tip. Their depolarisation spreads to the "
+            "sealed distal end, where the input impedance is highest, and the event starts there. ")
+
+
+def _threshold_txt(fail, ok) -> str:
+    parts = []
+    if len(fail):
+        parts.append(f"no synapse at {', '.join(f'{d:g}' for d in fail)} µm triggered an event even at "
+                     f"{max(mechanism.SCAN_WEIGHTS)} nS")
+    if len(ok):
+        o = ok.sort_values("distance_um")
+        parts.append(f"the synaptic weight needed to trigger an event rose from {o.threshold_nS.iloc[-1]:g} nS at "
+                     f"{o.distance_um.iloc[-1]:g} µm to {o.threshold_nS.iloc[0]:g} nS at {o.distance_um.iloc[0]:g} µm")
+    return ", and ".join(parts)
+
+
+def _rest_firing(single, train) -> str:
+    n = sum(int(r.summary.n_spikes_soma.sum()) for grid in (single, train) for res in grid.values() for r in res.values())
+    return ("No single synapse or train made the resting cell fire." if n == 0
+            else f"At rest, single synapses or trains evoked {n} somatic spikes in total.")
+
+
+def results_html(single, train, bias, noise_ev, D, cells, cfg, S) -> str:
+    n = single[(0.0, 1.0, 1.0)]["none"]
     short, long = cells["short"], cells["long"]
     zl, zs = D["impedance"]["long"], D["impedance"]["short"]
     z = lambda df, d: float(df.iloc[int(np.argmin(np.abs(df.distance_um - d)))]["zin_0Hz_MOhm"])  # noqa: E731
-    el = D["epsp"]["long"]
-    t_above = lambda d: float(el.iloc[int(np.argmin(np.abs(el.distance_um - d)))].t_above_ms)  # noqa: E731
-    ev = {p: _events(sp, p) for p in ("uniform", "hotspot", "increasing", "decreasing")}
-    ev_t = {p: _events(st, p) for p in ("uniform", "hotspot", "increasing", "decreasing")}
-    u_lo, u_hi = _soma_range(sp["uniform"], ev["uniform"])
-    none_l = n.summary.query("morphology == 'long'").sort_values("site_um")
-    u300 = _v(sp["uniform"], "long", 300, "peak_soma_mV")
-    equiv = float(np.interp(-u300, -none_l.peak_soma_mV.to_numpy(), none_l.site_um.to_numpy()))
-    th = D["thresholds"]
-    fail = th[th.threshold_nS.isna()].distance_um
-    ok = th[th.threshold_nS.notna()]
-    onset_tau = {t: mechanism.onset_um(df) for t, df in D["tau"].items()}
-    u = D["example"]["uniform"]
-    k = int(np.argmax(u["v_syn"]))
-    dec_peak_near = cfg.g_peak
-    geo = path_geometry(long, reference=short)
-    lo_h, hi_h = cfg.hotspot_center_um - cfg.hotspot_width_um / 2, cfg.hotspot_center_um + cfg.hotspot_width_um / 2
-    outside = max([lo_h - d for d in ev["hotspot"] if d < lo_h] + [d - hi_h for d in ev["hotspot"] if d > hi_h] + [0])
-    ul = sp["uniform"].summary
-    ul = ul[(ul.morphology == "long") & ul.site_um.isin(ev["uniform"])]
-    loc_abs = (ul.peak_syn_mV + ul.vrest_syn_mV)
-    spikes = int(sum(r.summary.n_spikes_soma.sum() for r in sp.values()))
-    gv = D["gating"]
-    tm = gv[(gv.v >= -60) & (gv.v <= -40)].m_tau
+    ns = n.summary.query("morphology == 'long'").set_index("site_um")
+    keys = sorted({(s, g) for s, g, m in single if m == 1.0}, key=lambda k: (k[0] != 0, k[1]))
     out = f"""
-<h3>Growing the dendrite increases the attenuation of its synaptic inputs</h3>
+<h3>Growing the dendrite isolates its distal inputs electrically</h3>
 <p>The dendrites of fast-spiking PV+ interneurons are thin, and their cable properties shape how quickly and how
 efficiently excitatory inputs reach the soma {cite('hu2010', 'norenberg2010')}. To ask how the length of a single
 dendrite affects this, we compared the original reconstruction of a human L2/3 PV+ interneuron model
-{cite('yao2022')}, in which the chosen dendrite ends {short.tip_distance:.1f} µm from the soma, with a copy in
-which we grew the same dendrite to {long.tip_distance:.0f} µm, leaving every other branch untouched (Fig. 1;
-Supplementary Fig. S1). Beyond its first {geo[1]['end_um']:.0f} µm, the target dendrite is a thin cable of nearly
-constant diameter ({geo[2]['diam_min_um']:.2f}–{geo[2]['diam_max_um']:.2f} µm), and its local input impedance rises
-steeply with distance, from {z(zl, 10):.0f} MΩ at 10 µm to {z(zl, 100):.0f} MΩ at 100 µm and
-{z(zl, 400):.0f} MΩ at the grown tip, against {zl.zin_soma_0Hz_MOhm.iloc[0]:.1f} MΩ at the soma (Fig. 4c).
-With passive dendrites, a {cfg.syn_weight_uS * 1e3:g} nS synapse 10 µm from the soma produced somatic EPSPs of
-{_v(n, 'short', 10, 'peak_soma_mV'):.2f} and {_v(n, 'long', 10, 'peak_soma_mV'):.2f} mV in the short and long
-morphologies, and the amplitude fell steeply with distance (Fig. 2g). Already at 100 µm, the somatic EPSP was
-smaller in the long ({_v(n, 'long', 100, 'peak_soma_mV'):.2f} mV) than in the short morphology
-({_v(n, 'short', 100, 'peak_soma_mV'):.2f} mV), where the same site is the sealed tip of the dendrite and
-has a higher local input impedance ({z(zs, 100):.0f} against {z(zl, 100):.0f} MΩ). At the grown tip, the somatic EPSP was only
-{_v(n, 'long', 400, 'peak_soma_mV'):.2f} mV, {100 * _v(n, 'long', 400, 'attenuation'):.1f}% of the local
-depolarisation ({_v(n, 'long', 400, 'peak_syn_mV'):.0f} mV). Taken together, these results indicate that
-lengthening the dendrite both adds a distal stretch of strongly attenuated inputs and slightly weakens inputs
-on the part that the two morphologies share.</p>
-
-<h3>Dendritic Ca<sub>LVA</sub> produces regenerative events at distal synapses only</h3>
-<p>We then inserted Ca<sub>LVA</sub>, with the kinetics of the model's somatic channel, along the dendrite of the
-long morphology. With a uniform density of {cfg.g_uniform:g} S/cm², synapses up to about
-{min(ev['uniform']) - cfg.site_step_um:.0f} µm behaved as in the passive dendrite, whereas every synapse from
-{_rng(ev['uniform'])} triggered a regenerative depolarisation: a second, slower component that followed the
-synaptic EPSP by several milliseconds and brought the local membrane potential to {loc_abs.min():.0f} to
-{loc_abs.max():.0f} mV (Fig. 2f, Fig. 4h). These
-events increased the somatic EPSP to {u_lo:.1f}–{u_hi:.1f} mV; a synapse at 300 µm, for instance, produced
-{u300:.2f} mV instead of {_v(n, 'long', 300, 'peak_soma_mV'):.2f} mV, as much as a passive synapse
-{equiv:.0f} µm from the soma (Fig. 2g). All other profiles gave the same all-or-none behaviour, with events
-for synapses at {_rng(ev['hotspot'])} (hotspot), {_rng(ev['increasing'])} (increasing) and
-{_rng(ev['decreasing'])} (decreasing gradient) (Fig. 3). Interestingly, synapses up to {outside:.0f} µm outside the
-hotspot ({lo_h:g}–{hi_h:g} µm) also triggered events, and the decreasing gradient, which has its highest density
-({dec_peak_near:g} S/cm²) next to the soma, did not produce any event proximally. {('Single synapses never evoked somatic action potentials.' if spikes == 0 else f'Single synapses evoked {spikes} somatic action potentials in total.')} These observations suggest that where the synapse sits, rather than where the
-channels sit, decides whether an event occurs.</p>
-
-<h3>The duration of the local depolarisation, not its amplitude, gates the event</h3>
-<p>To understand why events appear only beyond about 200 µm, we examined the passive local EPSP and the
-Ca<sub>LVA</sub> kinetics (Fig. 4). At rest ({D['rest_mV']:.1f} mV) only {100 * D['h_rest']:.0f}% of the channels
-are available, the activation is half-maximal at −40 mV, and its time constant is {tm.min():.1f}–{tm.max():.1f} ms between
-−60 and −40 mV
-(Fig. 4a,b). The peak of the passive local EPSP crossed −40 mV already about 60 µm from the soma, but it then
-levelled off near −30 mV between 130 and 250 µm, as the membrane approached the synaptic reversal potential
-(Fig. 4d), so that the peak alone cannot explain the onset. In contrast, the time the local EPSP spent above
-−50 mV kept increasing with distance, from {t_above(100):.1f} ms at 100 µm to {t_above(200):.1f} ms at 200 µm and
-{t_above(400):.1f} ms at the tip, reaching the activation time constant of Ca<sub>LVA</sub> where events began
-(Fig. 4e). Two manipulations supported this interpretation. First, no synapse at
-{', '.join(f'{d:g}' for d in fail)} µm triggered an event, even when we increased its weight to
-{max(mechanism.SCAN_WEIGHTS)} nS, whereas from {ok.distance_um.min():g} µm onwards the threshold fell from
-{ok.threshold_nS.iloc[0]:g} to {ok.threshold_nS.min():g} nS (Fig. 4f). Second, keeping the weight at
-{cfg.syn_weight_uS * 1e3:g} nS but slowing the decay of the synaptic conductance moved the onset towards the soma,
-from {onset_tau[min(onset_tau)]:.0f} µm (τ<sub>2</sub> = {min(onset_tau):g} ms) to
-{onset_tau[max(onset_tau)]:.0f} µm (τ<sub>2</sub> = {max(onset_tau):g} ms) (Fig. 4g). Once started, the event
-terminated itself: the activation gate rose close to 1 within a few milliseconds, while the inactivation gate fell
-from {u['h'][0]:.2f} to {u['h'].min():.3f} and recovered only slowly (Fig. 4i); the local peak occurred
-{u['t'][k] - cfg.onset_ms:.0f} ms after the synaptic input. Taken together, these results indicate that
-proximal synapses fail to recruit Ca<sub>LVA</sub> because the soma drains their charge before the slowly
-activating channels open, and that the electrically more isolated distal dendrite prolongs the local EPSP enough
-for the channels to activate and regenerate the depolarisation. We note that, at the most proximal sites, even a
-20 ms conductance decay did not suffice, which indicates that there the load of the soma dominates.</p>
-
-<h3>Channel placement matters when the total amount of channels is fixed</h3>
-<p>Because the profiles of Fig. 3 differ in their total amount of channels, we repeated the comparison with
-equal total conductance (Fig. 5). The uniform profile was unchanged by construction ({_rng(ev_t['uniform'])}),
-the denser hotspot triggered events at {_rng(ev_t['hotspot'])} with the largest local
-Δ[Ca<sup>2+</sup>]<sub>i</sub> ({st['hotspot'].summary.query("morphology == 'long'").dcai_syn_uM.max():.2f} µM),
-and the increasing gradient at {_rng(ev_t['increasing'])}. Unexpectedly at first sight, the decreasing gradient
-produced {('no event at any site' if not ev_t['decreasing'] else 'events at ' + _rng(ev_t['decreasing']))}, since
-it places most of its channels on the proximal dendrite, where synapses cannot trigger an event regardless of the
-local density (Fig. 4f). Among the distributions we tested, the one that weights the distal membrane most
-(increasing gradient) boosted the largest number of synapses ({len(ev_t['increasing'])} sites, against
-{len(ev_t['uniform'])} for the uniform and {len(ev_t['hotspot'])} for the hotspot profile), which suggests that,
-for a fixed number of channels, distal placement extends the boost to more synapses.</p>"""
-
-    if tr is not None:
-        ev_tr = _events(tr, "uniform")
-        s1 = _v(tr["uniform"], "long", 300, "summation_soma")
-        s0 = _v(tr["none"], "long", 300, "summation_soma")
-        pk_u, pk_n = _event_peaks(tr["uniform"], 300.0), _event_peaks(tr["none"], 300.0)
-        late = max(abs(a - b) for a, b in zip(pk_u[2:], pk_n[2:]))
-        n_ev = tr["uniform"].config.n_events
-        f_hz = tr["uniform"].config.freq_hz
-        out += f"""
-<h3>Trains and pharmacology</h3>
-<p>During a train of {n_ev} inputs at {f_hz:g} Hz, synapses at {_rng(ev_tr)} again triggered an event with uniform
-Ca<sub>LVA</sub>, but only once, at the start of the train. For a synapse at 300 µm, the local response to the
-first input reached {pk_u[0]:.0f} mV (against {pk_n[0]:.0f} mV without dendritic Ca<sub>LVA</sub>), the event
-extended into the response to the second input ({pk_u[1]:.0f} against {pk_n[1]:.0f} mV), and from the third input
-onwards the responses differed by less than {late:.1f} mV from those of the passive dendrite, consistent with the
-slow recovery of Ca<sub>LVA</sub> from inactivation (Fig. 4i). Because the event dominates the response to the
-first input, the train added little to it: the largest somatic depolarisation during the train was {s1:.2f} times
-the first response, against {s0:.2f} times without dendritic Ca<sub>LVA</sub> (Supplementary Fig. S2)."""
-        if tx is not None:
-            out += f""" Blocking Na<sup>+</sup> channels and removing somatic Ca<sub>LVA</sub> left the results almost
-unchanged (somatic EPSP at 300 µm with uniform Ca<sub>LVA</sub>: {_v(tx['uniform'], 'long', 300, 'peak_soma_mV'):.2f}
-against {u300:.2f} mV; Supplementary Fig. S3), indicating that the events are carried by the dendritic
-Ca<sub>LVA</sub> conductance and do not need Na<sup>+</sup> channels."""
-        out += "</p>"
+{cite('yao2022')}, in which the chosen dendrite ends {short.tip_distance:.1f} µm from the soma, with a copy in which
+we grew the same dendrite to {long.tip_distance:.0f} µm (Fig. 1). Along the grown dendrite, the local input
+impedance rose from {z(zl, 10):.0f} MΩ at 10 µm to {z(zl, 400):.0f} MΩ at the tip, against
+{zl.zin_soma_0Hz_MOhm.iloc[0]:.1f} MΩ at the soma (Fig. 2a), so that a {cfg.syn_weight_uS * 1e3:g} nS synapse
+depolarised its own membrane more, and for longer, the farther it was from the soma: the effective time constant
+of the local EPSP grew from {ns.tau_eff_ms_syn[50]:.1f} ms at 50 µm to {ns.tau_eff_ms_syn[400]:.1f} ms at the tip
+(Fig. 2e). At the soma, however, the same synapse produced {_v(n, 'long', 10, 'peak_soma_mV'):.2f} mV at 10 µm and
+only {_v(n, 'long', 400, 'peak_soma_mV'):.2f} mV at 400 µm (Fig. 3a). Already at 100 µm the somatic EPSP was smaller
+in the long ({_v(n, 'long', 100, 'peak_soma_mV'):.2f} mV) than in the short morphology
+({_v(n, 'short', 100, 'peak_soma_mV'):.2f} mV), where the same site is the sealed tip, with a higher local input
+impedance ({z(zs, 100):.0f} against {z(zl, 100):.0f} MΩ).</p>
+"""
+    # Ca_LVA, original kinetics, then shifted
+    par = []
+    for shift, g in keys:
+        res = single[(shift, g, 1.0)]
+        par.append(f"at {_cond(shift, g)}, the uniform profile gave {_events_txt(res, 'uniform')} and the increasing "
+                   f"profile {_events_txt(res, 'increasing')}, raising the somatic EPSP of a synapse at 300 µm "
+                   f"{_boost(res, 'uniform', 300):.2f}-fold and {_boost(res, 'increasing', 300):.2f}-fold, respectively")
+    near = []
+    for shift, g in keys:
+        res = single[(shift, g, 1.0)]
+        for prof in ("uniform", "increasing"):
+            r = res[prof].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+            b = res["none"].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+            hit = (r / b - 1)[(r / b - 1) > 0.10].index
+            near.append((shift, g, prof, float(min(hit)) if len(hit) else np.nan))
+    ex = single[(-15.0, max(g for _, g in keys), 1.0)] if (-15.0, max(g for _, g in keys), 1.0) in single else None
     out += f"""
+<h3>Dendritic Ca<sub>LVA</sub> boosts distal inputs, above a density threshold</h3>
+<p>We then inserted a low-voltage-activated Ca<sup>2+</sup> conductance (Ca<sub>LVA</sub>) along the grown dendrite,
+either with a uniform density or with a density increasing linearly from the soma, at two densities and with the
+original or a shifted activation curve (Fig. 3). Specifically, {'; '.join(par)}. The synapses closest to the soma
+were never boosted, but how close the boost reached depended on the condition: the nearest synapse whose somatic
+EPSP grew by more than 10% sat at {'; '.join(f'{_fmt0(d)} µm ({g:g} mS/cm², {KIN[s]}, {p})' for s, g, p, d in near)}.
+{_distal_initiation(ex)}Taken together, these results indicate that dendritic Ca<sub>LVA</sub> selectively amplifies
+inputs beyond a distance that shrinks as the channel density increases and as activation moves to more negative
+potentials, and that the increasing profile, which places more channels distally, is the more effective.</p>
+"""
+    # mouth
+    ch = []
+    for shift, g in keys:
+        for prof in ("none", "uniform", "increasing"):
+            a = single[(shift, g, 1.0)][prof].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+            b = single[(shift, g, 1.5)][prof].summary.query("morphology == 'long'").set_index("site_um").peak_soma_mV
+            ch.append((100 * (b / a - 1)).values)
+    ch = np.concatenate(ch)
+    out += f"""
+<h3>A wider proximal dendrite changes little</h3>
+<p>Because the soma acts as a strong current sink, we asked whether widening the proximal end of the dendrite
+would change these results. Increasing the diameter at the soma 1.5-fold, fading back to the original taper within
+{cfg.mouth_length_um:g} µm, changed the somatic EPSP by {ch.min():+.1f}% to {ch.max():+.1f}% across all sites and
+conditions, with the largest effect on the most proximal synapses, and did not change which synapses triggered
+Ca<sub>LVA</sub> events (Supplementary Fig. S2).</p>
+"""
+    # mechanism
+    mc = D["cfg"]
+    th = D["thresholds"]
+    fail = th[th.threshold_nS.isna()].distance_um
+    ok = th[th.threshold_nS.notna()]
+    onset = {t: mechanism.onset_um(df) for t, df in D["tau"].items()}
+    el = D["epsp"]["long"]
+    t_above = lambda d: float(el.iloc[int(np.argmin(np.abs(el.distance_um - d)))].t_above_ms)  # noqa: E731
+    u = D["example"][mc.ca_profile]
+    out += f"""
+<h3>The duration of the depolarisation, not its amplitude, gates the event</h3>
+<p>To understand why synapses close to the soma rarely trigger events, we analysed the condition with the most robust events
+({mc.ca_profile}, {mc.g_ca_mS_cm2:g} mS/cm², {KIN[mc.ca_act_shift_mV]} activation; Fig. 4). At rest only
+{100 * D['h_rest']:.0f}% of the channels are available, and activation is slow (Fig. 4a,b). The time the passive
+local EPSP spent above −50 mV increased with distance, from {t_above(100):.1f} ms at 100 µm to {t_above(400):.1f} ms
+at the tip (Fig. 4e), while its peak levelled off as the membrane approached the synaptic reversal potential
+(Fig. 4d). Two manipulations supported this interpretation. First, {_threshold_txt(fail, ok)} (Fig. 4f). Second, slowing the synaptic conductance decay at fixed weight moved the onset towards the soma, from
+{onset[min(onset)]:.0f} µm (τ<sub>2</sub> = {min(onset):g} ms) to {onset[max(onset)]:.0f} µm (τ<sub>2</sub> =
+{max(onset):g} ms) (Fig. 4g). Once started, the event terminated itself as the inactivation gate fell from
+{u['h'][0]:.2f} to {u['h'].min():.3f} (Fig. 4i).</p>
+"""
+    # trains
+    tk = sorted({(s, g) for s, g, m in train}, key=lambda k: (k[0] != 0, k[1]))
+    tr_par = "; ".join(f"{_cond(s, g)}: uniform {_events_txt(train[(s, g, 1.0)], 'uniform')}, increasing "
+                       f"{_events_txt(train[(s, g, 1.0)], 'increasing')}" for s, g in tk)
+    out += f"""
+<h3>Trains, steady depolarisation and noisy input</h3>
+<p>With trains of 5 inputs at 50 Hz, the same pattern held ({tr_par}; Supplementary Fig. S3). {_rest_firing(single, train)} To let the cell fire, we first held the soma with a steady current below rheobase
+(Supplementary Fig. S4)."""
+    for (shift, g), study in bias.items():
+        hi = max(study)
+        res = study[hi]
+        rest = res["none"].summary.query("morphology == 'long'").vrest_soma_mV.iloc[0]
+        fired = {p: res[p].summary.query("morphology == 'long' and n_spikes_soma > 0").site_um.tolist() for p in res}
+        out += (f" With {_cond(shift, g)} at {100 * hi:.0f}% of rheobase (rest {rest:.1f} mV), the synapses that "
+                f"fired the cell were at {', '.join(f'{_rng(v)} ({p})' if v else f'no site ({p})' for p, v in fired.items())}.")
+        mid = 0.5 if 0.5 in study else None
+        if mid is not None:
+            b0, bm = _boost(study[0.0], "uniform", 300), _boost(study[mid], "uniform", 300)
+            out += (f" Below threshold, the uniform-profile boost at 300 µm went from {b0:.2f}-fold at rest to "
+                    f"{bm:.2f}-fold at {100 * mid:.0f}% of rheobase"
+                    + (", consistent with depolarisation inactivating Ca<sub>LVA</sub>." if bm < b0 - 0.05 else "."))
+    if noise_ev is not None and len(noise_ev):
+        far = noise_ev[(noise_ev.site_um >= 150) & (noise_ev.site_um <= 250)].groupby("condition", sort=False).p_evoked.mean()
+        near = noise_ev[noise_ev.site_um <= 100].groupby("condition", sort=False).p_evoked.mean()
+        out += (" Finally, with a fluctuating somatic current that made the cell fire irregularly (Fig. 5), the "
+                "extra spike probability added by a synapse at 50–100 µm was "
+                + ", ".join(f"{near[c]:.2f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c in near.index)
+                + ", and at 150–250 µm "
+                + ", ".join(f"{far[c]:.2f} ({c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')})" for c in far.index)
+                + f"; with {S['noise']['n_trials']} trials per site (one trial = {1 / S['noise']['n_trials']:.2f}) "
+                  "these estimates are preliminary.")
+    out += "</p>"
+    out += """
 <p class="meta">A limit of these simulations is that the dendritic Ca<sub>LVA</sub> borrows the kinetics of the
-somatic channel and that its dendritic densities are assumptions; the conclusions about where events can be
-triggered, however, rest on the passive cable properties of the dendrite and on the slow gating of the channel,
-which we varied systematically.</p>"""
+somatic channel and that its dendritic densities are assumptions; we therefore varied density, distribution and
+activation range systematically.</p>"""
     return out
 
 
 # --- Figure legends ------------------------------------------------------------------------------
 
-def legends_html(R: dict, D: dict, cells: dict, cfg: Config) -> str:
-    sp = R["single_peak"]
-    ns, nl = _n_sites(sp["none"], "short"), _n_sites(sp["none"], "long")
+def legends_html(single, D, cells, cfg, S) -> str:
     short, long = cells["short"], cells["long"]
+    F = S["factors"]
     syn = (f"Exp2Syn, τ<sub>1</sub> = {cfg.syn_tau1_ms:g} ms, τ<sub>2</sub> = {cfg.syn_tau2_ms:g} ms, "
            f"w = {cfg.syn_weight_uS * 1e3:g} nS")
+    gs = " and ".join(f"{g:g}" for g in F["g_ca_mS_cm2"])
+    N = S["noise"]
     legends = [
         ("Figure 1", "figures/morphology/dendrogram.pdf",
          "Short and long versions of the same dendrite of a human L2/3 PV+ interneuron model.",
-         f"Dendrograms of the basal tree of the original reconstruction (<b>top</b>, short morphology) and of the same "
-         f"cell with the target dendrite grown (<b>bottom</b>, long morphology). Each branch is drawn at its path "
-         f"distance from the soma; vertical lines are branch points. The target dendrite (thick) ends at "
-         f"{short.tip_distance:.1f} µm in the short and at {long.tip_distance:.1f} µm in the long morphology; the tick "
-         f"marks the original tip. All other branches are identical. An interactive 3D view is available in the "
-         f"online report."),
-        ("Figure 2", "figures/single_peak/overview_uniform.pdf",
-         "Uniform dendritic Ca<sub>LVA</sub> produces regenerative events for distal synapses.",
-         f"<b>a, b</b>, Dendrograms of the short and long morphologies; the target dendrite of the long morphology is "
-         f"coloured by Ca<sub>LVA</sub> density (uniform, {cfg.g_uniform:g} S/cm²) and circles mark the synapse sites "
-         f"of the traces in <b>d–f</b>. <b>c</b>, Ca<sub>LVA</sub> density along the long dendrite. <b>d, e</b>, Somatic "
-         f"membrane potential for single synaptic events ({syn}) at increasing distance from the soma (colour scale) in "
-         f"the short (<b>d</b>) and long (<b>e</b>) morphology. <b>f</b>, Membrane potential at the synapse in the long "
-         f"morphology; the delayed second hump is the Ca<sub>LVA</sub> event. <b>g–i</b>, Somatic EPSP amplitude "
-         f"(<b>g</b>), local EPSP amplitude (<b>h</b>) and attenuation (<b>i</b>, somatic/local, log scale) as a "
-         f"function of synapse distance; dashed, short morphology (n = {ns} sites); solid, long morphology "
-         f"(n = {nl} sites). Each point is one simulation with one synapse."),
-        ("Figure 3", "figures/single_peak/comparison.pdf",
-         "The distance dependence of synaptic efficacy for different Ca<sub>LVA</sub> distributions.",
-         f"<b>a</b>, Ca<sub>LVA</sub> density along the long dendrite for the uniform ({cfg.g_uniform:g} S/cm²), hotspot "
-         f"({cfg.hotspot_center_um - cfg.hotspot_width_um / 2:g}–{cfg.hotspot_center_um + cfg.hotspot_width_um / 2:g} µm), "
-         f"increasing and decreasing profiles (peak {cfg.g_peak:g} S/cm²). <b>b–f</b>, Somatic EPSP (<b>b</b>), local "
-         f"EPSP (<b>c</b>), attenuation (<b>d</b>), local Δ[Ca<sup>2+</sup>]<sub>i</sub> (<b>e</b>) and somatic EPSP "
-         f"area (<b>f</b>) against synapse distance, for the short morphology (dashed grey) and for the long morphology "
-         f"with each profile (colours; dark grey, no dendritic Ca<sub>LVA</sub>). Single events, {syn}; one synapse per "
-         f"simulation, sites every {cfg.site_step_um:g} µm (n = {ns} short, {nl} long per profile)."),
+         f"Dendrograms of the basal tree of the original reconstruction (top, short morphology) and of the same cell with "
+         f"the target dendrite grown (bottom, long morphology). Each branch is drawn at its path distance from the soma; "
+         f"vertical lines are branch points. The target dendrite (thick) ends at {short.tip_distance:.1f} µm in the short "
+         f"and at {long.tip_distance:.1f} µm in the long morphology; the tick marks the original tip."),
+        ("Figure 2", "figures/electrotonic/electrotonic.pdf",
+         "Electrotonic structure of the target dendrite and EPSP time course.",
+         "<b>a</b>, Local input impedance along the target dendrite at 0 Hz (thick) and 100 Hz (thin) in the short "
+         "(dashed), long (solid) and long morphology with a wider mouth (dash-dot); dotted line, soma. <b>b</b>, Transfer "
+         "impedance to the soma. <b>c</b>, Steady-state voltage attenuation to the soma. <b>d–f</b>, Integral (log "
+         "scale), effective time constant (integral/peak) and decay time constant (exponential fit, 80–20% of the peak) "
+         f"of the EPSP at the soma (thick) and at the synapse (thin) against synapse distance ({syn}), without and with "
+         f"dendritic Ca<sub>LVA</sub> ({D['cfg'].ca_profile}, {D['cfg'].g_ca_mS_cm2:g} mS/cm², "
+         f"{KIN[D['cfg'].ca_act_shift_mV]} activation)."),
+        ("Figure 3", "figures/single/factorial.pdf",
+         "Dendritic Ca<sub>LVA</sub> boosts distal inputs depending on density, distribution and activation range.",
+         f"Columns: Ca<sub>LVA</sub> density ({gs} mS/cm²) with the original (half-activation of m at −40 mV) or shifted "
+         f"(−55 mV) activation. <b>a–d</b>, Somatic EPSP against synapse distance for the short morphology (dashed grey), "
+         f"the long morphology without dendritic Ca<sub>LVA</sub> (dark grey), and with uniform (blue) or increasing "
+         f"(green) density. <b>e–h</b>, Extra local depolarisation due to Ca<sub>LVA</sub>; dotted line, event "
+         f"criterion ({mechanism.EVENT_CRITERION_MV:g} mV). Single events, {syn}; one synapse per simulation, every "
+         f"{cfg.site_step_um:g} µm."),
         ("Figure 4", "figures/mechanism/mechanism.pdf",
          "Ca<sub>LVA</sub> events require a long-lasting local depolarisation.",
-         f"<b>a</b>, Steady-state activation (m<sub>∞</sub>²) and availability (h<sub>∞</sub>) of Ca<sub>LVA</sub>; "
-         f"dotted line, resting potential ({D['rest_mV']:.1f} mV). <b>b</b>, Activation and inactivation time constants at "
-         f"{cfg.celsius:g} °C. <b>c</b>, Local input impedance (0 Hz) along the target dendrite of the passive short "
-         f"(dashed) and long (solid) morphologies; dotted line, soma. <b>d, e</b>, Peak (<b>d</b>) and time above −50 mV "
-         f"(<b>e</b>) of the local EPSP without dendritic Ca<sub>LVA</sub> ({syn}). <b>f</b>, Smallest synaptic weight "
-         f"that triggers a Ca<sub>LVA</sub> event (uniform profile); triangles, no event up to "
-         f"{max(mechanism.SCAN_WEIGHTS)} nS; dotted line, default weight. <b>g</b>, Extra local depolarisation due to "
-         f"Ca<sub>LVA</sub> for synaptic decay time constants τ<sub>2</sub> of "
-         f"{', '.join(f'{t:g}' for t in mechanism.TAU2_VALUES)} ms at fixed weight; dotted line, event criterion "
-         f"({mechanism.EVENT_CRITERION_MV:g} mV). <b>h</b>, Local membrane potential for a synapse at "
-         f"{D['example_site']:g} µm with (blue) and without (dashed) Ca<sub>LVA</sub>. <b>i</b>, Ca<sub>LVA</sub> gates at "
-         f"the same site: activation (m²), inactivation (h) and open probability (m²h, normalised)."),
-        ("Figure 5", "figures/single_total/comparison.pdf",
-         "With equal total conductance, distal channels boost more synapses.",
-         f"As in Fig. 3, but with every profile scaled to the same total Ca<sub>LVA</sub> conductance on the dendrite, "
-         f"equal to a uniform density of {cfg.g_total_equiv:g} S/cm²."),
-        ("Supplementary Figure S1", "figures/morphology/diameter.pdf",
-         "Geometry of the target dendrite.",
-         "<b>a</b>, Diameter along the target dendrite (reconstruction points) in the short (dashed) and long (solid) "
-         "morphologies; grey, every other soma-to-tip path of the cell. <b>b</b>, Cumulative membrane area of the "
-         "target dendrite from the soma; dotted line, membrane area of the soma."),
-        ("Supplementary Figure S2", "figures/train5x50Hz_peak/comparison.pdf",
-         "Responses to trains of synaptic inputs.",
-         "As in Fig. 3, for trains of 5 events at 50 Hz; amplitudes are the largest depolarisation during the train."),
-        ("Supplementary Figure S3", "figures/single_peak_TTX_noSomaCa/comparison.pdf",
-         "Dendritic events do not require Na<sup>+</sup> channels or somatic Ca<sub>LVA</sub>.",
-         "As in Fig. 3, with NaTg and Nap removed from all compartments (TTX) and somatic Ca<sub>LVA</sub> removed."),
+         f"Condition: {D['cfg'].ca_profile}, {D['cfg'].g_ca_mS_cm2:g} mS/cm², {KIN[D['cfg'].ca_act_shift_mV]} "
+         "activation. <b>a</b>, Steady-state activation (m∞², dashed: original) and availability (h∞); dotted line, rest. "
+         "<b>b</b>, Time constants. <b>c</b>, Local input impedance. <b>d, e</b>, Peak and time above −50 mV of the "
+         "passive local EPSP. <b>f</b>, Smallest synaptic weight that triggers an event; triangles, no event up to "
+         f"{max(mechanism.SCAN_WEIGHTS)} nS. <b>g</b>, Local boost for synaptic decay time constants of "
+         f"{', '.join(f'{t:g}' for t in mechanism.TAU2_VALUES)} ms. <b>h</b>, Local potential with and without "
+         f"Ca<sub>LVA</sub> for a synapse at {D['example_site']:g} µm. <b>i</b>, Ca<sub>LVA</sub> gates at the same site."),
+        ("Figure 5", "figures/noise/noise.pdf",
+         "Distal synapses and firing with a noisy somatic current.",
+         f"The soma receives a mean current of {100 * N['mu_frac']:.0f}% of rheobase plus Ornstein–Uhlenbeck noise "
+         f"(s.d. {100 * N['sigma_frac']:.0f}% of rheobase, {N['tau_ms']:g} ms). <b>a, b</b>, Somatic potential in three "
+         f"trials with the same noise without (grey) and with (blue) a synapse at {N['example_site_um']:g} µm. <b>c</b>, "
+         f"Spike probability added by the synapse within {N['window_ms']:g} ms, against its distance ({N['n_trials']} "
+         "paired trials per site). <b>d</b>, Median latency of the first spike."),
+        ("Supplementary Figure S1", "figures/morphology/diameter.pdf", "Geometry of the target dendrite.",
+         "<b>a</b>, Diameter along the target dendrite in the short, long and wide-mouth morphologies; grey, every other "
+         "soma-to-tip path. <b>b</b>, Cumulative membrane area; dotted line, soma."),
+        ("Supplementary Figure S2", "figures/single/mouth.pdf", "Effect of a wider proximal dendrite.",
+         "Relative change of the somatic EPSP with the 1.5× mouth against synapse distance, for each density and "
+         "activation range."),
+        ("Supplementary Figure S3", "figures/train/factorial.pdf", "Trains of synaptic inputs.",
+         "As Fig. 3, for 5 inputs at 50 Hz; amplitudes are the largest depolarisation during the train."),
+        ("Supplementary Figure S4", "figures/bias/", "Firing with a steady somatic current.",
+         "Somatic and local potential for synapses every 20 µm with a steady somatic current at 95% of rheobase, for "
+         "each activation range; thick traces, the cell fires."),
     ]
-    items = "".join(f"<div class='legend'><p><b>{name} | {title}</b> {body}</p>"
-                    f"<p class='meta'>File: <code>{path}</code></p></div>"
-                    for name, path, title, body in legends)
-    return items
+    return "".join(f"<div class='legend'><p><b>{name} | {title}</b> {body}</p>"
+                   f"<p class='meta'>File: <code>{path}</code></p></div>" for name, path, title, body in legends)
 
 
 def _minus(text: str) -> str:
@@ -494,13 +543,13 @@ def _minus(text: str) -> str:
     return re.sub(r"(?<![\w.\-/])-(\d)", "\u2212\\1", text)
 
 
-def html(R: dict, D: dict, cells: dict, cfg: Config) -> str:
+def html(single, train, bias, noise_ev, D, cells, cfg, S) -> str:
     return _minus(f"""
 <h2 id="manuscript">Draft manuscript material</h2>
 <p class="meta">Draft text for a manuscript, written from the simulations in this report; every number is filled in
 from the data when the report is built. Figure numbers refer to the proposed figure set listed under
 <i>Figure legends</i>; reference numbers refer to the list at the end. To be edited by the authors.</p>
-<h2 id="ms-methods">Methods</h2>{methods_html(cells, cfg, D['rest_mV'])}
-<h2 id="ms-results">Results</h2>{results_html(R, D, cells, cfg)}
-<h2 id="ms-legends">Figure legends</h2>{legends_html(R, D, cells, cfg)}
+<h2 id="ms-methods">Methods</h2>{methods_html(cells, cfg, D['rest_mV'], S, D['cfg'])}
+<h2 id="ms-results">Results</h2>{results_html(single, train, bias, noise_ev, D, cells, cfg, S)}
+<h2 id="ms-legends">Figure legends</h2>{legends_html(single, D, cells, cfg, S)}
 {references_html()}""")

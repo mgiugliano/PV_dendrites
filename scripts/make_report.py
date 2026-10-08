@@ -1,4 +1,4 @@
-"""Build figures/report.html: every figure set of configs/figure_set.json in one page.
+"""Build figures/report.html: every study of configs/studies.json in one page.
 
 Uses the cached results in results/ (runs whatever is missing).
 """

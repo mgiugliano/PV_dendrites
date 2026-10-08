@@ -16,7 +16,7 @@ from IPython.display import display
 
 from . import plotting
 from ._paths import CONFIG_DIR, FIGURES_DIR
-from .config import CA_NORMS, CA_PROFILES, Config
+from .config import CA_PROFILES, Config
 from .protocols import get_cell, run_sweep
 
 IN_COLAB = "google.colab" in sys.modules
@@ -50,17 +50,14 @@ class Explorer:
         # Ca channels
         w["ca_profile"] = W.Dropdown(options=CA_PROFILES, value=cfg.ca_profile,
                                      description="Dendritic Ca_LVA", layout=_WIDE, style=_STYLE)
-        w["ca_norm"] = W.ToggleButtons(options=CA_NORMS, value=cfg.ca_norm, description="Normalise by",
-                                       style={**_STYLE, "button_width": "80px"})
-        w["g_uniform"] = num(cfg.g_uniform, "g uniform (S/cm²)", 0.001)
-        w["g_peak"] = num(cfg.g_peak, "g peak (S/cm²)", 0.001)
-        w["g_total_equiv"] = num(cfg.g_total_equiv, "g total-equiv. (S/cm²)", 0.001)
-        w["hotspot_center_um"] = fl(cfg.hotspot_center_um, "Hotspot centre (µm)", 0, 400, 5, ".0f")
-        w["hotspot_width_um"] = fl(cfg.hotspot_width_um, "Hotspot width (µm)", 10, 400, 5, ".0f")
+        w["g_ca_mS_cm2"] = fl(cfg.g_ca_mS_cm2, "Density g (mS/cm²)", 0.1, 5.0, 0.1, ".1f")
+        w["ca_act_shift_mV"] = fl(cfg.ca_act_shift_mV, "Activation shift (mV)", -25, 0, 1, ".0f")
         w["gradient_span_um"] = fl(cfg.gradient_span_um, "Gradient span (µm)", 50, 400, 10, ".0f")
+        w["mouth_scale"] = fl(cfg.mouth_scale, "Mouth diameter (×)", 1.0, 2.0, 0.1, ".1f")
         # switches
         w["somatic_ca_lva"] = W.Checkbox(value=cfg.somatic_ca_lva, description="Somatic Ca_LVA on")
         w["ttx"] = W.Checkbox(value=cfg.ttx, description="TTX (NaTg, Nap = 0)")
+        w["soma_bias_frac"] = fl(cfg.soma_bias_frac, "Somatic bias (× rheobase)", 0.0, 0.98, 0.01, ".2f")
         w["prune_side_branches"] = W.Checkbox(value=cfg.prune_side_branches,
                                               description="Prune side branches")
         w["short"] = W.Checkbox(value="short" in cfg.morphologies, description="Short (100 µm)")
@@ -80,7 +77,6 @@ class Explorer:
         w["name"] = W.Text(value=cfg.name, description="Run name", layout=_WIDE, style=_STYLE)
 
         w["ca_profile"].observe(lambda _: self._refresh(), "value")
-        w["ca_norm"].observe(lambda _: self._refresh(), "value")
 
         b = self.b = {
             "sweep": W.Button(description="Run sweep", button_style="primary", icon="play"),
@@ -100,10 +96,9 @@ class Explorer:
         self.out = W.Output()
 
         tabs = W.Tab(children=[
-            W.VBox([w["ca_profile"], w["ca_norm"], w["g_uniform"], w["g_peak"], w["g_total_equiv"],
-                    w["hotspot_center_um"], w["hotspot_width_um"], w["gradient_span_um"]]),
-            W.VBox([w["somatic_ca_lva"], w["ttx"], W.HTML("<b>Morphologies</b>"), w["short"], w["long"],
-                    w["prune_side_branches"]]),
+            W.VBox([w["ca_profile"], w["g_ca_mS_cm2"], w["ca_act_shift_mV"], w["gradient_span_um"]]),
+            W.VBox([w["somatic_ca_lva"], w["ttx"], w["soma_bias_frac"], W.HTML("<b>Morphologies</b>"), w["short"],
+                    w["long"], w["mouth_scale"], w["prune_side_branches"]]),
             W.VBox([w["syn_weight_nS"], w["syn_tau1_ms"], w["syn_tau2_ms"], w["n_events"], w["freq_hz"]]),
             W.VBox([w["site_start_um"], w["site_step_um"], w["site_um"], w["name"]]),
         ])
@@ -116,14 +111,10 @@ class Explorer:
 
     # --- widgets -> Config -----------------------------------------------------------
     def _refresh(self):
-        w, prof, norm = self.w, self.w["ca_profile"].value, self.w["ca_norm"].value
-        dend = prof != "none"
-        w["ca_norm"].disabled = not dend
-        w["g_uniform"].disabled = not (dend and norm == "peak" and prof == "uniform")
-        w["g_peak"].disabled = not (dend and norm == "peak" and prof != "uniform")
-        w["g_total_equiv"].disabled = not (dend and norm == "total")
-        w["hotspot_center_um"].disabled = w["hotspot_width_um"].disabled = prof != "hotspot"
-        w["gradient_span_um"].disabled = prof not in ("increasing", "decreasing")
+        w, prof = self.w, self.w["ca_profile"].value
+        for k in ("g_ca_mS_cm2", "ca_act_shift_mV"):
+            w[k].disabled = prof == "none"
+        w["gradient_span_um"].disabled = prof != "increasing"
 
     def config(self, **overrides) -> Config:
         w = self.w

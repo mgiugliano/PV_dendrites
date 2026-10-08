@@ -67,7 +67,7 @@ def test_target_path_is_unbranched_after_pruning():
     assert len(c.pruned) > 0
 
 
-@pytest.mark.parametrize("profile", ["uniform", "hotspot", "increasing", "decreasing"])
+@pytest.mark.parametrize("profile", ["uniform", "increasing"])
 def test_ca_only_on_long_target_path(profile):
     cfg = Config(ca_profile=profile)
     for morph in ("short", "long"):
@@ -75,28 +75,44 @@ def test_ca_only_on_long_target_path(profile):
         g = calcium.configure(cell, cfg)
         on_path = set(cell.target_path)
         for sec in cell.basal:
-            has = h.ismembrane("Ca_LVA", sec=sec)
+            has = h.ismembrane("Ca_LVA_dend", sec=sec)
             assert has == (morph == "long" and sec in on_path), (morph, sec)
             assert h.ismembrane("CaDynamics", sec=sec) == has
         assert (g > 0).any() == (morph == "long")
 
 
-def test_profiles_shape_and_total_normalisation():
-    cfg = Config()
+def test_profiles_shape():
+    cfg = Config(g_ca_mS_cm2=2.5)
     cell = get_cell("long", cfg)
     d = np.array([x for _, x in cell.path_segments()])
     a = np.array([seg.area() for seg, _ in cell.path_segments()])
-    totals = []
-    for prof in ("uniform", "hotspot", "increasing", "decreasing"):
-        g = calcium.path_gbar(cfg.replace(ca_profile=prof, ca_norm="total"), d, a)
-        totals.append(np.sum(g * a))
-    assert np.allclose(totals, cfg.g_total_equiv * a.sum(), rtol=1e-12)
+    gu = calcium.path_gbar(cfg.replace(ca_profile="uniform"), d)
+    gi = calcium.path_gbar(cfg.replace(ca_profile="increasing"), d)
+    assert np.allclose(gu, 2.5e-3)
+    mid = int(np.argmin(np.abs(d - cfg.gradient_span_um / 2)))
+    assert gi[mid] == pytest.approx(2.5e-3, rel=0.01) and gi[0] < 1e-4
+    assert np.sum(gi * a) == pytest.approx(np.sum(gu * a), rel=0.03)  # about the same total conductance
 
-    g = calcium.path_gbar(cfg.replace(ca_profile="increasing"), d, a)
-    assert g[0] < g[-1] and g.max() == pytest.approx(cfg.g_peak, rel=5e-3)  # last segment centre ~1 um before the tip
-    g = calcium.path_gbar(cfg.replace(ca_profile="hotspot"), d, a)
-    inside = np.abs(d - cfg.hotspot_center_um) <= cfg.hotspot_width_um / 2
-    assert np.all(g[inside] == cfg.g_peak) and np.all(g[~inside] == 0)
+
+def test_wider_mouth_only_changes_the_proximal_diameter():
+    base, wide = PVCell("long"), PVCell("long", mouth_scale=1.5)
+    for sb, sw in zip(base.target_path, wide.target_path):
+        for i in range(sb.n3d()):
+            d = base.distance(sb(0)) + sb.arc3d(i)
+            expected = sb.diam3d(i) * (1 + 0.5 * max(0.0, 1 - d / 13.0))
+            assert sw.diam3d(i) == pytest.approx(expected, rel=1e-4)
+    assert wide.target_path[0].diam3d(0) == pytest.approx(1.5 * base.target_path[0].diam3d(0), rel=1e-4)
+
+
+def test_shifted_activation_lowers_the_event_threshold_and_zero_shift_is_identical():
+    from pvdend.protocols import run_site
+    out = {}
+    for shift in (0.0, -15.0):
+        cfg = Config(ca_profile="increasing", g_ca_mS_cm2=1.0, ca_act_shift_mV=shift, morphologies=["long"])
+        cell = get_cell("long", cfg)
+        calcium.configure(cell, cfg)
+        out[shift] = run_site(cell, cfg, 300.0)["v_syn"].max()
+    assert out[-15.0] > out[0.0] + 5
 
 
 def test_switches_restore_model_values():
@@ -122,14 +138,27 @@ def test_sweep_runs_and_is_at_rest():
     assert s[("short", 50)] > s[("long", 50)] > 0
 
 
-def test_ca_lva_rates_copy_matches_mod():
-    """mechanism.ca_lva_rates must reproduce the steady states computed by mod/Ca_LVA.mod."""
+@pytest.mark.parametrize("shift", [0.0, -15.0])
+def test_ca_lva_rates_copy_matches_mod(shift):
+    """mechanism.ca_lva_rates must reproduce the steady states of mod/Ca_LVA_dend.mod."""
     from pvdend.mechanism import ca_lva_rates
-    sec = h.Section(name="calva_probe")
-    sec.insert("Ca_LVA")
+    sec = h.Section(name=f"calva_probe_{abs(shift):g}")
+    sec.insert("Ca_LVA_dend")
+    sec(0.5).Ca_LVA_dend.vshift_act = shift
     h.celsius = 34.0
     for v in (-90.0, -60.0, -40.0, -20.0):
         h.finitialize(v)
-        m_inf, _, h_inf, _ = ca_lva_rates(v, 34.0)
-        assert sec(0.5).m_Ca_LVA == pytest.approx(float(m_inf), rel=1e-9)
-        assert sec(0.5).h_Ca_LVA == pytest.approx(float(h_inf), rel=1e-9)
+        m_inf, _, h_inf, _ = ca_lva_rates(v, 34.0, shift)
+        assert sec(0.5).m_Ca_LVA_dend == pytest.approx(float(m_inf), rel=1e-9)
+        assert sec(0.5).h_Ca_LVA_dend == pytest.approx(float(h_inf), rel=1e-9)
+
+
+def test_dendritic_copy_with_zero_shift_matches_original_channel():
+    sec = h.Section(name="calva_pair")
+    sec.insert("Ca_LVA")
+    sec.insert("Ca_LVA_dend")
+    h.celsius = 34.0
+    for v in (-80.0, -50.0, -30.0):
+        h.finitialize(v)
+        assert sec(0.5).m_Ca_LVA_dend == pytest.approx(sec(0.5).m_Ca_LVA, rel=1e-12)
+        assert sec(0.5).h_Ca_LVA_dend == pytest.approx(sec(0.5).h_Ca_LVA, rel=1e-12)
