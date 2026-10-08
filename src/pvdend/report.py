@@ -355,7 +355,6 @@ def bias_html(bias: dict, S: dict) -> str:
 def noise_html(spikes, examples, S: dict) -> str:
     N = S["noise"]
     ev = studies.evoked_spikes(spikes, N)
-    ps = studies.psth(spikes, N)
     rows = []
     for cond, grp in ev.groupby("condition", sort=False):
         cells = "".join(
@@ -369,8 +368,10 @@ def noise_html(spikes, examples, S: dict) -> str:
              f"<th colspan='{len(N['sites_um'])}'>Extra spikes per input ({c0:g}–{c1:g} ms), mean [95% CI], for a synapse "
              f"at (µm)</th></tr><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
     contrast = studies.contrast_example(spikes, S)
-    fig = plotting.noise_figure(ps, ev, {**examples, "contrast": contrast}, N,
-                                example_conditions=list(studies.EXAMPLE_PAIR))
+    ps5 = studies.psth(spikes, {**N, "psth_bin_ms": 5.0})
+    fig = plotting.noise_figure(ps5, ev, {**examples, "contrast": contrast}, {**N, "psth_bin_ms": 5.0},
+                                example_conditions=list(studies.EXAMPLE_PAIR),
+                                cumulative=studies.cumulative_extra(spikes, N))
     el = studies.early_late(spikes, N).set_index(["condition", "site_um"])
     site = N["example_site_um"]
     split = "".join(f"<tr><td>{c.replace('Ca_LVA', 'Ca<sub>LVA</sub>')}</td><td>{el.early[(c, site)]:.3f}</td>"
@@ -394,10 +395,13 @@ def noise_html(spikes, examples, S: dict) -> str:
                            "(b) it does. This pattern occurred for "
                            f"{contrast.get('n_found', 0)} of {contrast.get('n_inputs', 0)} inputs (block "
                            f"{contrast.get('block', '–')}, input {contrast.get('input', '–')} shown). "
-                           "<b>c–e</b>, PSTH of the spikes added by the synapse (with − without, 2 ms bins, 3-bin moving "
-                           "average) for synapses at 100, 200 and 300 µm. <b>f</b>, Extra spikes per input against "
-                           "synapse distance, mean and 95% CI. <b>g</b>, Firing rate around the input for a synapse at "
-                           f"{N['example_site_um']:g} µm, with (solid) and without (dashed) the synapse.", "noise/noise"))
+                           "<b>c–e</b>, Cumulative extra spikes per input (synapse − same noise without synapse) from the "
+                           "input onwards, mean and bootstrap 95% CI, for synapses at 100, 200 and 300 µm; the value at "
+                           f"{N['count_window_ms'][1]:g} ms (dotted line) is the one plotted in <b>f</b>, and the slope shows "
+                           "when the extra spikes occur. <b>f</b>, Extra spikes per input against synapse distance, mean and "
+                           "95% CI. <b>g</b>, Firing rate around the input (5 ms bins) for a synapse at "
+                           f"{N['example_site_um']:g} µm, with (solid) and without (dashed) the synapse; the background "
+                           "firing is included.", "noise/noise"))
 
 
 def _threshold_sentence(th) -> str:

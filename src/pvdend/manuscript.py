@@ -528,11 +528,11 @@ def legends_html(single, D, cells, cfg, S) -> str:
          f"The soma receives a mean current of {100 * N['mu_frac']:.0f}% of rheobase plus Ornstein–Uhlenbeck noise "
          f"(s.d. {100 * N['sigma_frac']:.0f}% of rheobase, {N['tau_ms']:g} ms). <b>a, b</b>, Somatic potential during two "
          f"synaptic inputs (dotted lines), with the same noise, without (grey) and with (blue) a synapse at "
-         f"{N['example_site_um']:g} µm. <b>c–e</b>, PSTH of the spikes added by the synapse (with − without, "
-         f"{N['psth_bin_ms']:g} ms bins, 3-bin moving average) for synapses at 100, 200 and 300 µm. <b>f</b>, Extra spikes "
+         f"{N['example_site_um']:g} µm. <b>c–e</b>, Cumulative extra spikes per input (with − without the synapse) "
+         "from the input onwards, mean and bootstrap 95% CI, for synapses at 100, 200 and 300 µm. <b>f</b>, Extra spikes "
          f"per input against synapse distance (mean and bootstrap 95% CI; {N['n_blocks'] * N['inputs_per_block']} inputs "
-         f"per site). <b>g</b>, Firing rate around the input for a synapse at {N['example_site_um']:g} µm with (solid) and "
-         "without (dashed) the synapse. Colours: short (dashed grey), long without Ca<sub>LVA</sub> (black), uniform "
+         f"per site). <b>g</b>, Firing rate around the input (5 ms bins) for a synapse at {N['example_site_um']:g} µm with "
+         "(solid) and without (dashed) the synapse. Colours: short (dashed grey), long without Ca<sub>LVA</sub> (black), uniform "
          "(blue) and increasing (green) Ca<sub>LVA</sub> with original (dotted) or shifted (solid) activation."),
         ("Supplementary Figure S1", "figures/morphology/diameter.pdf", "Geometry of the target dendrite.",
          "<b>a</b>, Diameter along the target dendrite in the short, long and wide-mouth morphologies; grey, every other "

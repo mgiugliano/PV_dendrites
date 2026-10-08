@@ -284,3 +284,23 @@ def contrast_example(spikes: dict, S=None, pair=EXAMPLE_PAIR) -> dict:
             arrays[f"{label}|{tag}|t"], arrays[f"{label}|{tag}|v"] = tt, vv
     np.savez_compressed(path, **arrays)
     return out
+
+
+def cumulative_extra(spikes: dict, N: dict, t_max=100.0, dt=1.0, n_boot=1000) -> dict:
+    """{(label, site): (t, mean, ci_lo, ci_hi)}: extra spikes per input accumulated from the input to time t.
+
+    Paired difference (synapse − same noise without synapse), bootstrap 95% CI over inputs.
+    """
+    t = np.arange(0.0, t_max + 1e-9, dt)
+    rng = np.random.default_rng(0)
+    out = {}
+    for (label, site), rel in spikes.items():
+        if site is None:
+            continue
+        base = spikes[(label, None)]
+        d = np.array([np.searchsorted(np.sort(a[a >= 0]), t, side="right")
+                      - np.searchsorted(np.sort(b[b >= 0]), t, side="right") for a, b in zip(rel, base)], float)
+        idx = rng.integers(0, len(d), (n_boot, len(d)))
+        boot = d[idx].mean(axis=1)
+        out[(label, site)] = (t, d.mean(axis=0), np.percentile(boot, 2.5, axis=0), np.percentile(boot, 97.5, axis=0))
+    return out

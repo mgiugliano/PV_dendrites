@@ -881,12 +881,8 @@ def noise_style(cond: str) -> dict:
     return dict(color=PROFILE_COLORS[prof], ls="-" if "shifted" in cond else ":")
 
 
-def _smooth(y, k=3):
-    return np.convolve(y, np.ones(k) / k, mode="same")
-
-
 def noise_figure(psth_data: dict, evoked, examples: dict, N: dict, psth_sites=(100, 200, 300),
-                 example_conditions=None):
+                 example_conditions=None, cumulative=None):
     """Noisy somatic current: example traces, PSTHs of the spikes added by the synapse, evoked spikes vs distance."""
     set_style()
     fig = plt.figure(figsize=(TWO_COL, 165 * MM), layout="constrained")
@@ -910,23 +906,25 @@ def noise_figure(psth_data: dict, evoked, examples: dict, N: dict, psth_sites=(1
         panel_label(ax, next(letters))
     top = 0.0
     axes_p = []
+    c1 = N["count_window_ms"][1]
     for j, site in enumerate(psth_sites):
         ax = fig.add_subplot(gs[1, 2 * j:2 * j + 2])
         for cond in conds:
-            if (cond, site) not in psth_data:
+            if (cond, site) not in cumulative:
                 continue
-            t, h1, h0 = psth_data[(cond, site)]
-            y = _smooth(h1 - h0)
-            top = max(top, y.max())
-            ax.plot(t, y, lw=1, **noise_style(cond))
+            t, m, lo, hi = cumulative[(cond, site)]
+            st = noise_style(cond)
+            ax.plot(t, m, lw=1, **st)
+            ax.fill_between(t, lo, hi, color=st["color"], alpha=0.07, lw=0)
+            top = max(top, hi.max())
         ax.axhline(0, color=INK_2, lw=0.5)
-        ax.axvline(0, color=INK, lw=0.6, ls=":")
-        ax.set(xlim=(-20, 100), xlabel="Time from synaptic input (ms)", title=f"Synapse at {site:g} µm",
-               ylabel="Extra firing rate (Hz)" if j == 0 else "")
+        ax.axvline(c1, color=INK_2, lw=0.6, ls=":")
+        ax.set(xlim=(0, t[-1]), xlabel="Time from synaptic input (ms)", title=f"Synapse at {site:g} µm",
+               ylabel="Cumulative extra spikes per input" if j == 0 else "")
         axes_p.append(ax)
         panel_label(ax, next(letters))
     for ax in axes_p:
-        ax.set_ylim(top=top * 1.1)
+        ax.set_ylim(top=top * 1.08)
     ax = fig.add_subplot(gs[2, 0:3])
     for cond, grp in evoked.groupby("condition", sort=False):
         st = noise_style(cond)
@@ -944,11 +942,11 @@ def noise_figure(psth_data: dict, evoked, examples: dict, N: dict, psth_sites=(1
         if (cond, site) in psth_data:
             t, h1, h0 = psth_data[(cond, site)]
             st = noise_style(cond)
-            ax2.plot(t, _smooth(h1), lw=1, **st)
-            ax2.plot(t, _smooth(h0), lw=0.6, color=st["color"], alpha=0.5, ls="--")
+            ax2.plot(t, h1, lw=1, drawstyle="steps-mid", **st)
+            ax2.plot(t, h0, lw=0.6, color=st["color"], alpha=0.5, ls="--", drawstyle="steps-mid")
     ax2.axvline(0, color=INK, lw=0.6, ls=":")
     ax2.set(xlim=(-50, 150), xlabel="Time from synaptic input (ms)", ylabel="Firing rate (Hz)",
-            title=f"PSTH, synapse at {site:g} µm (dashed: no synapse)")
+            title=f"PSTH ({N['psth_bin_ms']:g} ms bins), synapse at {site:g} µm (dashed: no synapse)")
     panel_label(ax2, next(letters))
     h_, l_ = ax.get_legend_handles_labels()
     fig.legend(h_, l_, loc="outside lower center", ncol=3, fontsize=5.5)
