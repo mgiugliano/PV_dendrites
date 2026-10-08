@@ -475,8 +475,9 @@ def build(set_file=None, out=None, progress=None) -> Path:
 # --- executive summary, firing study, AI statement -------------------------------------------------
 
 AI_STATEMENT = (
-    "<b>Use of AI tools.</b> An AI assistant was used as a programming aid to help write and organise the "
-    "simulation code, figures and this report. The scientific questions, the choice of models and analyses, "
+    "<b>Use of AI tools.</b> Claude (Anthropic) was used as an AI programming assistant: to convert the original "
+    "HOC model code to Python, and to help write the simulation scripts, including the script that grows the "
+    "dendrite, as well as the figures and this report. The scientific questions, the choice of models and analyses, "
     "and the interpretation of the results are the author's. The author takes full and sole responsibility "
     "for all results and text.")
 
