@@ -47,6 +47,10 @@ def main():
         for p in plotting.save_figure(fig, "bias/firing"):
             print("saved", p)
         plotting.plt.close(fig)
+        fig = plotting.spike_traces_figure(study, max(study))
+        for p in plotting.save_figure(fig, "bias/spike_traces"):
+            print("saved", p)
+        plotting.plt.close(fig)
 
 
 if __name__ == "__main__":

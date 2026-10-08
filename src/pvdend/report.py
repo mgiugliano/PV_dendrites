@@ -504,6 +504,8 @@ def bias_html(study: dict, example_site_um: float) -> str:
              "spike.</p>")
     fig = plotting.firing_figure(study, example_site_um)
     plotting.save_figure(fig, "bias/firing", formats=("pdf", "png"))
+    fig2 = plotting.spike_traces_figure(study, max(study))
+    plotting.save_figure(fig2, "bias/spike_traces", formats=("pdf", "png"))
     return f"""
 <h2 id='bias'>Firing near threshold: somatic bias current</h2>
 <p class='meta'>TTX off, the cell is free to fire. A steady current at the soma, set to 0, 50% or 95% of each cell's
@@ -520,6 +522,13 @@ dendritic boost shrinks: at 300 µm, uniform Ca<sub>LVA</sub> raises the somatic
 <li>At 95% of rheobase, synapses within 100 µm fire the cell in all conditions; only the increasing gradient, which
 concentrates channels distally, lets distal synapses fire it ({_range(_fired(study[0.95]['increasing']))} µm).</li>
 </ul>
+<figure>{_svg(fig2)}<figcaption><b>Action potentials evoked by single synapses</b> at
+{100 * max(study):.0f}% of rheobase. <b>Top</b>, somatic membrane potential; <b>bottom</b>, membrane potential at the
+synapse, for synapses every 20 µm along the target dendrite (colour: distance from the soma). Thick traces are the
+synapses that make the cell fire. Columns: short morphology; long morphology without dendritic Ca<sub>LVA</sub>, with
+uniform Ca<sub>LVA</sub>, and with the increasing gradient. With the increasing gradient, distal synapses first trigger
+the dendritic Ca<sub>LVA</sub> event (bottom), whose depolarisation spreads to the soma and fires the cell (top);
+without it, only the proximal synapses reach threshold.</figcaption></figure>
 <figure>{_svg(fig)}<figcaption><b>Firing near threshold.</b> One row per bias level. <b>Left</b>, somatic
 membrane potential for a synapse at {example_site_um:g} µm in the long morphology, without (dashed) and with uniform
 (blue) dendritic Ca<sub>LVA</sub>. <b>Middle</b>, number of somatic spikes against synapse distance (dashed, short

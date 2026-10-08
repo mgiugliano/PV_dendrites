@@ -669,3 +669,47 @@ def firing_figure(study: dict, example_site_um=300.0):
     h_, l_ = axes[0][1].get_legend_handles_labels()
     fig.legend(h_, l_, loc="outside lower center", ncol=len(l_))
     return fig
+
+
+def spike_traces_figure(study: dict, frac: float, profiles=("none", "uniform", "increasing"), window_ms=60.0):
+    """Somatic and local traces at one bias level, coloured by synapse distance; spikes when the cell fires."""
+    set_style()
+    res = study[frac]
+    cols = [("short", "none")] + [("long", p) for p in profiles]
+    fig, axes = plt.subplots(2, len(cols), figsize=(TWO_COL, 100 * MM), layout="constrained",
+                             sharex=True, sharey="row")
+    norm = mpl.colors.Normalize(0, 400)
+    letters = iter("abcdefghij")
+    for j, (morph, prof) in enumerate(cols):
+        r = res[prof]
+        cfg = r.config
+        keys = sorted(d for m, d in r.traces if m == morph)
+        keys = [d for d in keys if abs(d / 20 - round(d / 20)) < 1e-6 or d == keys[0]]  # every 20 µm
+        summ = r.summary[r.summary.morphology == morph].set_index("site_um")
+        for d in keys:
+            tr = r.traces[(morph, d)]
+            fired = summ.loc[d, "n_spikes_soma"] > 0
+            for row, where in ((0, "v_soma"), (1, "v_syn")):
+                axes[row, j].plot(tr["t"], tr[where], color=SITE_CMAP(norm(d)), lw=1.1 if fired else 0.6,
+                                  zorder=3 if fired else 2)
+        n_f = int((summ.n_spikes_soma > 0).sum())
+        title = f"{MORPH_STYLE[morph]['label'].split(' ')[0]}, " + ("no dendritic Ca$_{LVA}$" if prof == "none"
+                                                                   else f"{prof} Ca$_{{LVA}}$")
+        axes[0, j].set_title(f"{title}\n{n_f} of {len(summ)} sites fire the cell", fontsize=7)
+        axes[0, j].set_xlim(cfg.onset_ms - 5, cfg.onset_ms + window_ms)
+        axes[1, j].set_xlabel("Time (ms)")
+        for row in (0, 1):
+            panel_label(axes[row, j], next(letters) if row == 0 else "")
+    for j in range(len(cols)):
+        panel_label(axes[1, j], "efgh"[j])
+    axes[0, 0].set_ylabel("V$_{soma}$ (mV)")
+    axes[1, 0].set_ylabel("V at synapse (mV)")
+    cb = fig.colorbar(mpl.cm.ScalarMappable(norm=norm, cmap=SITE_CMAP), ax=axes, fraction=0.02, pad=0.01)
+    cb.set_label("Synapse distance (µm)", fontsize=6)
+    cb.ax.tick_params(labelsize=5, width=0.5)
+    cb.outline.set_linewidth(0.5)
+    sl = res["none"].summary.query("morphology == 'long'")
+    b = sl.bias_nA.iloc[0] if "bias_nA" in sl else 0.0
+    fig.suptitle(f"Somatic bias {100 * frac:.0f}% of rheobase ({b:.3f} nA, rest {sl.vrest_soma_mV.iloc[0]:.1f} mV); "
+                 f"single synaptic events, 5 nS; thick traces: the cell fires", fontsize=7)
+    return fig
