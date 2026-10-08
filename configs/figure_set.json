@@ -64,5 +64,23 @@
       ],
       "note": "Na<sup>+</sup> channels blocked everywhere and somatic Ca<sub>LVA</sub> removed. The results are almost identical to set 1: the dendritic event does not depend on Na<sup>+</sup> channels or somatic Ca<sub>LVA</sub>."
     }
-  ]
+  ],
+  "bias_study": {
+    "name": "bias",
+    "base_set": "single_peak",
+    "fractions": [
+      0.0,
+      0.5,
+      0.95
+    ],
+    "profiles": [
+      "none",
+      "uniform",
+      "hotspot",
+      "increasing",
+      "decreasing"
+    ],
+    "example_site_um": 300.0,
+    "note": "Somatic DC bias as a fraction of each cell's rheobase, applied throughout the simulation (TTX off, the cell is free to fire). Fraction 0 is figure set 1."
+  }
 }

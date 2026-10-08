@@ -10,7 +10,7 @@ import json
 
 from _common import progress
 
-from pvdend import Config, get_cell, load_or_run, plotting
+from pvdend import Config, get_cell, load_or_run, plotting, studies
 from pvdend._paths import CONFIG_DIR
 
 
@@ -38,6 +38,13 @@ def main():
             plotting.plt.close(fig)
         fig = plotting.comparison_figure(results)
         for p in plotting.save_figure(fig, f"{entry['name']}/comparison"):
+            print("saved", p)
+        plotting.plt.close(fig)
+
+    if not args.only or "bias" in args.only:  # somatic bias study (configs/figure_set.json: bias_study)
+        study = studies.bias_study(progress=lambda name: print(name))
+        fig = plotting.firing_figure(study, studies.figure_set()["bias_study"]["example_site_um"])
+        for p in plotting.save_figure(fig, "bias/firing"):
             print("saved", p)
         plotting.plt.close(fig)
 

@@ -45,6 +45,9 @@ class Config:
     somatic_ca_lva: bool = True  # False: somatic Ca_LVA gbar = 0
     ttx: bool = False  # True: NaTg and Nap gbar = 0 everywhere
 
+    # --- steady somatic bias current ----------------------------------------
+    soma_bias_frac: float = 0.0  # DC at the soma, as a fraction of the cell's rheobase (0: none)
+
     # --- excitatory synapse (Exp2Syn conductance) ----------------------------
     syn_tau1_ms: float = 0.3
     syn_tau2_ms: float = 3.0
@@ -73,6 +76,10 @@ class Config:
         for m in self.morphologies:
             if m not in MORPHOLOGIES:
                 raise ValueError(f"morphologies must be a subset of {MORPHOLOGIES}")
+        if not 0 <= self.soma_bias_frac < 1:
+            raise ValueError("soma_bias_frac must be in [0, 1): the cell must stay below rheobase")
+        if self.soma_bias_frac > 0 and self.ttx:
+            raise ValueError("a bias relative to rheobase is undefined with TTX (the cell cannot fire)")
         if self.n_events < 1 or self.freq_hz <= 0:
             raise ValueError("n_events must be >= 1 and freq_hz > 0")
 

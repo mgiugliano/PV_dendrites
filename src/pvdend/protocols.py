@@ -21,6 +21,8 @@ from .config import Config
 from .morphology import path_location
 
 SPIKE_THRESHOLD_MV = 0.0
+RHEOBASE_STEP_MS = 1000.0  # duration of the current step used to measure rheobase
+ALWAYS_ON = dict(delay=-1e12, dur=1e13)  # IClamp active also during steady-state initialisation
 TIP_TOL_UM = 1e-3  # sites this close beyond the tip are placed at the tip
 _trapz = getattr(np, "trapezoid", None) or np.trapz  # numpy < 2 compatibility
 _CELLS: dict = {}
@@ -32,6 +34,58 @@ def get_cell(morph: str, cfg: Config) -> PVCell:
     if key not in _CELLS:
         _CELLS[key] = PVCell(morph, cfg.prune_side_branches, cfg.max_seg_len_um)
     return _CELLS[key]
+
+
+def _rheobase_key(morph: str, cfg: Config) -> str:
+    """Rheobase depends on the cell and its channels, not on synapse or site settings."""
+    keep = ("prune_side_branches", "max_seg_len_um", "ca_profile", "ca_norm", "g_uniform", "g_peak",
+            "g_total_equiv", "hotspot_center_um", "hotspot_width_um", "gradient_span_um", "cadyn_gamma",
+            "cadyn_decay_ms", "somatic_ca_lva", "ttx", "celsius", "dt_ms", "v_init_mV")
+    return json.dumps([morph] + [getattr(cfg, k) for k in keep])
+
+
+def _spikes(v) -> int:
+    v = np.asarray(v)
+    return int(np.sum((v[1:] >= SPIKE_THRESHOLD_MV) & (v[:-1] < SPIKE_THRESHOLD_MV)))
+
+
+def rheobase_nA(morph: str, cfg: Config, tol=0.002) -> float:
+    """Smallest step current at the soma (RHEOBASE_STEP_MS long) that evokes a spike; cached on disk."""
+    path = RESULTS_DIR / "rheobase.json"
+    cache = json.loads(path.read_text()) if path.exists() else {}
+    key = _rheobase_key(morph, cfg)
+    if key in cache:
+        return cache[key]
+    cell = get_cell(morph, cfg)
+    calcium.configure(cell, cfg)
+    h.celsius, h.dt = cfg.celsius, cfg.dt_ms
+    stim = h.IClamp(cell.soma[0](0.5))
+    stim.delay, stim.dur = 50.0, RHEOBASE_STEP_MS
+    v = h.Vector().record(cell.soma[0](0.5)._ref_v)
+
+    def fires(amp):
+        stim.amp = amp
+        steady_state_init(cfg.v_init_mV)
+        h.continuerun(stim.delay + stim.dur + 20)
+        return _spikes(v) > 0
+
+    lo, hi = 0.0, 0.5
+    while not fires(hi):
+        lo, hi = hi, hi * 2
+        if hi > 20:
+            raise RuntimeError("no spike up to 20 nA")
+    while hi - lo > tol:
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if fires(mid) else (mid, hi)
+    stim.amp = 0
+    cache[key] = hi
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, indent=1))
+    return hi
+
+
+def bias_nA(morph: str, cfg: Config) -> float:
+    return cfg.soma_bias_frac * rheobase_nA(morph, cfg) if cfg.soma_bias_frac > 0 else 0.0
 
 
 def site_distances(cfg: Config, tip_um: float) -> np.ndarray:
@@ -60,6 +114,7 @@ def _rec(ref):
 
 def run_site(cell: PVCell, cfg: Config, distance_um: float) -> dict:
     """Simulate one synapse at `distance_um`; returns traces (numpy arrays)."""
+    amp = bias_nA(cell.label, cfg)  # first: may run its own (cached) rheobase simulations
     h.celsius, h.dt = cfg.celsius, cfg.dt_ms
     sec, x, actual = path_location(cell, cell.target_path, distance_um)
     syn = h.Exp2Syn(sec(x))
@@ -69,6 +124,9 @@ def run_site(cell: PVCell, cfg: Config, distance_um: float) -> dict:
         cfg.onset_ms, cfg.n_events, cfg.interval_ms, 0)
     nc = h.NetCon(stim, syn)
     nc.weight[0], nc.delay = cfg.syn_weight_uS, 0
+    bias = h.IClamp(cell.soma[0](0.5))
+    bias.delay, bias.dur = ALWAYS_ON["delay"], ALWAYS_ON["dur"]
+    bias.amp = amp
 
     tip = cell.target_path[-1](1.0)
     recs = {"t": _rec(h._ref_t), "v_soma": _rec(cell.soma[0](0.5)._ref_v),
@@ -84,7 +142,9 @@ def run_site(cell: PVCell, cfg: Config, distance_um: float) -> dict:
     h.continuerun(cfg.tstop_ms)
 
     out = {k: np.array(v) for k, v in recs.items()}
-    out.update(site_um=distance_um, site_actual_um=actual, section=sec.name().split(".")[-1], x=x)
+    out.update(site_um=distance_um, site_actual_um=actual, section=sec.name().split(".")[-1], x=x,
+               bias_nA=bias.amp)
+    bias.amp = 0
     return out
 
 
@@ -122,8 +182,10 @@ def measure(tr: dict, cfg: Config) -> dict:
     if cfg.n_events > 1:
         peaks = [v[(t >= on + i * isi) & (t < on + (i + 1) * isi)].max() for i in range(cfg.n_events)]
         m["summation_soma"] = max(peaks) / peaks[0] if peaks[0] > 0 else np.nan
-    m["n_spikes_soma"] = int(np.sum((tr["v_soma"][1:] >= SPIKE_THRESHOLD_MV)
-                                    & (tr["v_soma"][:-1] < SPIKE_THRESHOLD_MV)))
+    m["n_spikes_soma"] = _spikes(tr["v_soma"])
+    up = np.nonzero((tr["v_soma"][1:] >= SPIKE_THRESHOLD_MV) & (tr["v_soma"][:-1] < SPIKE_THRESHOLD_MV))[0]
+    m["first_spike_ms"] = float(t[up[0] + 1] - on) if len(up) else np.nan
+    m["spikes_before_input"] = int(np.sum(t[up + 1] < on)) if len(up) else 0
     m["area_soma_mVms"] = float(_trapz(np.clip(v[post], 0, None), t[post]))
     if "cai_syn" in tr:
         c = tr["cai_syn"]
@@ -194,7 +256,7 @@ def run_sweep(cfg: Config, progress=None, keep_traces=True) -> Result:
             progress(i, len(jobs), f"{morph}: {d:g} um")
         tr = run_site(cell, cfg, d)
         rows.append({"morphology": morph, "site_um": d, "site_actual_um": tr["site_actual_um"],
-                     "section": tr["section"], **measure(tr, cfg)})
+                     "section": tr["section"], "bias_nA": tr["bias_nA"], **measure(tr, cfg)})
         if keep_traces:
             traces[(morph, float(d))] = tr
     if progress:
@@ -206,7 +268,7 @@ def load_or_run(cfg: Config, folder=None, force=False, progress=None) -> Result:
     """Reuse saved results if the stored config is identical, otherwise run and save."""
     folder = Path(folder or RESULTS_DIR / cfg.name)
     if not force and (folder / "config.json").exists():
-        if json.loads((folder / "config.json").read_text()) == json.loads(cfg.to_json()):
+        if Config.from_json(folder / "config.json") == cfg:  # missing new fields take their defaults
             return Result.load(folder)
     res = run_sweep(cfg, progress=progress)
     res.save(folder)

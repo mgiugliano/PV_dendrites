@@ -607,3 +607,65 @@ def diameter_figure(cells: dict):
     panel_label(axes[0], "a")
     panel_label(axes[1], "b")
     return fig
+
+
+def firing_figure(study: dict, example_site_um=300.0):
+    """Somatic bias study: example traces, spikes and Ca_LVA boost vs distance, one row per bias level."""
+    from .mechanism import EVENT_CRITERION_MV
+    set_style()
+    fracs = sorted(study)
+    fig, axes = plt.subplots(len(fracs), 3, figsize=(TWO_COL, 52 * MM * len(fracs)), layout="constrained",
+                             sharex="col")
+    axes = np.atleast_2d(axes)
+    letters = iter("abcdefghijklmnop")
+    for row, frac in zip(axes, fracs):
+        res = study[frac]
+        none = res["none"]
+        sl = none.summary
+        b_long = sl[sl.morphology == "long"].bias_nA.iloc[0] if "bias_nA" in sl else 0.0
+        v_rest = sl[sl.morphology == "long"].vrest_soma_mV.iloc[0]
+        label = ("no bias current" if frac == 0 else
+                 f"bias {100 * frac:.0f}% of rheobase ({b_long:.3f} nA)")
+
+        ax = row[0]
+        for prof, style in (("none", dict(color=INK_2, ls="--", label="long, no dendritic Ca$_{LVA}$")),
+                            ("uniform", dict(color=PROFILE_COLORS["uniform"], label="long, uniform Ca$_{LVA}$"))):
+            tr = res[prof].traces.get(("long", example_site_um))
+            if tr is not None:
+                ax.plot(tr["t"], tr["v_soma"], lw=0.9, **style)
+        cfg = none.config
+        ax.set(xlim=(cfg.onset_ms - 5, cfg.onset_ms + 80), ylabel="V$_{soma}$ (mV)",
+               title=f"{label}; rest {v_rest:.1f} mV")
+        ax.text(0.98, 0.95, f"synapse at {example_site_um:g} µm", transform=ax.transAxes, ha="right", va="top",
+                fontsize=6, color=INK_2)
+        if row is axes[0]:
+            ax.legend(loc="center right")
+
+        ax = row[1]
+        plot_vs_distance(ax, none, "n_spikes_soma", morphs=["short"])
+        for prof, r in res.items():
+            plot_vs_distance(ax, r, "n_spikes_soma", morphs=["long"], color=PROFILE_COLORS[prof], label=prof)
+        ax.set(ylabel="Somatic spikes", title="Does the synapse fire the cell?", ylim=(-0.15, None))
+        ax.yaxis.set_major_locator(mpl.ticker.MaxNLocator(integer=True))
+
+        ax = row[2]
+        base = none.summary.query("morphology == 'long'").set_index("site_um").peak_syn_mV
+        for prof, r in res.items():
+            if prof == "none":
+                continue
+            extra = r.summary.query("morphology == 'long'").set_index("site_um").peak_syn_mV - base
+            ax.plot(extra.index, extra.values, color=PROFILE_COLORS[prof], marker="o", ms=2, mew=0, lw=1, label=prof)
+        ax.axhline(EVENT_CRITERION_MV, color=INK_2, lw=0.6, ls=":")
+        ax.set(xlim=(0, 405), ylabel="Local boost by Ca$_{LVA}$ (mV)", title="Dendritic Ca$_{LVA}$ event")
+        for ax in row:
+            panel_label(ax, next(letters))
+    for ax in axes[-1]:
+        ax.set_xlabel(ax.get_xlabel() or "Time (ms)")
+    axes[-1][0].set_xlabel("Time (ms)")
+    axes[-1][1].set_xlabel("Synapse distance from soma (µm)")
+    axes[-1][2].set_xlabel("Synapse distance from soma (µm)")
+    for ax in axes[:-1].ravel():
+        ax.set_xlabel("")
+    h_, l_ = axes[0][1].get_legend_handles_labels()
+    fig.legend(h_, l_, loc="outside lower center", ncol=len(l_))
+    return fig

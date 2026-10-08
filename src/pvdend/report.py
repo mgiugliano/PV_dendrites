@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import neuron
 import numpy as np
 
-from . import __version__, manuscript, mechanism, plotting, viewer3d
+from . import __version__, manuscript, mechanism, plotting, studies, viewer3d
 from ._paths import CONFIG_DIR, FIGURES_DIR
 from .config import Config
 from .morphology import load_target_meta, path_geometry
@@ -65,6 +65,9 @@ details { margin:8px 0; } summary { cursor:pointer; color:var(--accent); }
 nav ol { padding-left:20px; } a { color:var(--accent); }
 .eq { text-align:center; margin:10px 0; } .legend { margin:14px 0; }
 ol.refs li { margin:4px 0; }
+.exec { background:#eef4fc; border-left:4px solid var(--accent); padding:8px 18px 8px 8px; margin:18px 0; }
+.exec h2 { border:none; margin:6px 0 4px 10px; padding:0; } .exec li { margin:8px 0; font-size:16px; }
+.ai { margin-top:40px; padding-top:12px; border-top:1px solid var(--rule); font-size:13px; color:var(--ink2); }
 .swatch { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }
 @media print { details { display:block; } summary { display:none; } h2 { break-before:page; }
                figure { break-inside:avoid; } }
@@ -440,6 +443,12 @@ def build(set_file=None, out=None, progress=None) -> Path:
     toc.insert(1, "<li><a href='#mechanism'>Mechanism: why only distal synapses trigger a Ca event</a></li>")
     body.insert(n_morph, mechanism_html(D, ref))  # right after the morphology section
     plotting.save_figure(plotting.mechanism_figure(D), "mechanism/mechanism", formats=("pdf", "png"))
+    fs = studies.figure_set(set_file)
+    study = None
+    if "bias_study" in fs:
+        study = studies.bias_study(set_file=set_file, progress=progress)
+        body.append(bias_html(study, fs["bias_study"]["example_site_um"]))
+        toc.append("<li><a href='#bias'>Firing near threshold: somatic bias current</a></li>")
     body.append(manuscript.html(all_results, D, cells, base))
     toc += ["<li><a href='#manuscript'>Draft manuscript material</a>: <a href='#ms-methods'>Methods</a> · "
             "<a href='#ms-results'>Results</a> · <a href='#ms-legends'>Figure legends</a> · "
@@ -452,10 +461,104 @@ def build(set_file=None, out=None, progress=None) -> Path:
 <h1>Short (100 µm) vs grown (400 µm) dendrite of a human PV+ interneuron</h1>
 <p class="meta">Generated {dt.datetime.now():%Y-%m-%d %H:%M} · pvdend {__version__} · NEURON {neuron.__version__}
 · figure set <code>{set_file.name}</code></p>
+{executive_html(all_results, D, study)}
 <nav><ol>{''.join(toc)}</ol></nav>
 <h2 id="methods">Methods in brief</h2>{methods_html(base)}
 {''.join(body)}
+<p class="ai">{AI_STATEMENT}</p>
 </main></body></html>"""
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page)
     return out
+
+
+# --- executive summary, firing study, AI statement -------------------------------------------------
+
+AI_STATEMENT = (
+    "<b>Use of AI tools.</b> An AI assistant was used as a programming aid to help write and organise the "
+    "simulation code, figures and this report. The scientific questions, the choice of models and analyses, "
+    "and the interpretation of the results are the author's. The author takes full and sole responsibility "
+    "for all results and text.")
+
+
+def _fired(res, morph="long"):
+    s = res.summary
+    return s[(s.morphology == morph) & (s.n_spikes_soma > 0)].site_um.tolist()
+
+
+def bias_html(study: dict, example_site_um: float) -> str:
+    rows = []
+    for frac, res in sorted(study.items()):
+        sl = res["none"].summary.query("morphology == 'long'")
+        b = sl.bias_nA.iloc[0] if "bias_nA" in sl else 0.0
+        cells = "".join(f"<td>{_range(_fired(r)) if _fired(r) else 'none'}</td>" for r in res.values())
+        rows.append(f"<tr><td>{100 * frac:.0f}%</td><td>{b:.3f}</td><td>{sl.vrest_soma_mV.iloc[0]:.1f}</td>"
+                    f"<td>{_range(_fired(res['none'], 'short')) if _fired(res['none'], 'short') else 'none'}</td>"
+                    f"{cells}</tr>")
+    profs = list(next(iter(study.values())))
+    head = "".join(f"<th>long, {p}</th>" for p in profs)
+    table = ("<div class='tablewrap'><table><thead><tr><th>Bias (of rheobase)</th><th>Bias (nA)</th>"
+             "<th>Rest (mV)</th><th>short</th>" + head + "</tr></thead><tbody>" + "".join(rows) +
+             "</tbody></table></div><p class='meta'>Cells: synapse sites (µm) that make the cell fire at least one "
+             "spike.</p>")
+    fig = plotting.firing_figure(study, example_site_um)
+    plotting.save_figure(fig, "bias/firing", formats=("pdf", "png"))
+    return f"""
+<h2 id='bias'>Firing near threshold: somatic bias current</h2>
+<p class='meta'>TTX off, the cell is free to fire. A steady current at the soma, set to 0, 50% or 95% of each cell's
+rheobase (smallest 1 s current step that evokes a spike), is applied throughout the simulation; single events,
+5 nS, peak-normalised Ca<sub>LVA</sub> profiles as in set 1.</p>
+{table}
+<ul>
+<li>Without bias, no 5 nS synapse fires the cell. Stronger synapses (tested up to 120 nS at 10, 50, 100, 200, 300
+and 400 µm) fire it only from 10 µm, with or without dendritic Ca<sub>LVA</sub>.</li>
+<li>The bias depolarises the whole cell, dendrite included. Depolarisation inactivates Ca<sub>LVA</sub>, so the
+dendritic boost shrinks: at 300 µm, uniform Ca<sub>LVA</sub> raises the somatic EPSP to
+{_value(study[0.0]['uniform'], 'long', 300, 'peak_soma_mV'):.2f} mV without bias but only to
+{_value(study[0.5]['uniform'], 'long', 300, 'peak_soma_mV'):.2f} mV at 50%.</li>
+<li>At 95% of rheobase, synapses within 100 µm fire the cell in all conditions; only the increasing gradient, which
+concentrates channels distally, lets distal synapses fire it ({_range(_fired(study[0.95]['increasing']))} µm).</li>
+</ul>
+<figure>{_svg(fig)}<figcaption><b>Firing near threshold.</b> One row per bias level. <b>Left</b>, somatic
+membrane potential for a synapse at {example_site_um:g} µm in the long morphology, without (dashed) and with uniform
+(blue) dendritic Ca<sub>LVA</sub>. <b>Middle</b>, number of somatic spikes against synapse distance (dashed, short
+morphology; colours, long morphology with each profile). <b>Right</b>, extra local depolarisation due to
+Ca<sub>LVA</sub>; dotted line, event criterion.</figcaption></figure>"""
+
+
+def executive_html(R: dict, D: dict, study: dict | None) -> str:
+    sp, st = R["single_peak"], R["single_total"]
+    n = sp["none"]
+    ev = lambda res, p: event_sites(res, p)  # noqa: E731
+    u300, n300 = _value(sp["uniform"], "long", 300, "peak_soma_mV"), _value(n, "long", 300, "peak_soma_mV")
+    onset = {t: mechanism.onset_um(df) for t, df in D["tau"].items()}
+    items = [
+        f"<b>A longer dendrite loses its distal inputs.</b> Growing the dendrite from 100 to 400 µm, a synapse at "
+        f"the new tip moves the soma by only {_value(n, 'long', 400, 'peak_soma_mV'):.2f} mV, against "
+        f"{_value(n, 'long', 10, 'peak_soma_mV'):.1f} mV near the soma; the shared proximal part is also slightly "
+        f"weakened ({_value(n, 'short', 100, 'peak_soma_mV'):.2f} → {_value(n, 'long', 100, 'peak_soma_mV'):.2f} mV at "
+        f"100 µm).",
+        f"<b>Dendritic Ca<sub>LVA</sub> rescues distal synapses, all or none.</b> Synapses beyond about "
+        f"{min(ev(sp, 'uniform')):.0f} µm trigger a regenerative Ca<sub>LVA</sub> event that raises their somatic "
+        f"effect about {u300 / n300:.1f}-fold (at 300 µm: {n300:.2f} → {u300:.2f} mV), as large as a passive "
+        f"synapse close to the soma; proximal synapses never trigger it.",
+        f"<b>Duration, not amplitude, decides.</b> Ca<sub>LVA</sub> opens slowly. Near the soma the local EPSP is too "
+        f"brief, and no synaptic strength up to {max(mechanism.SCAN_WEIGHTS)} nS helps; a slower synaptic decay moves "
+        f"the onset from {onset[min(onset)]:.0f} to {onset[max(onset)]:.0f} µm.",
+        f"<b>Where the channels are matters less than where the synapse is.</b> With the same total amount of "
+        f"channels, the decreasing gradient (channels near the soma) produces "
+        f"{'no event at all' if not ev(st, 'decreasing') else 'events at ' + _range(ev(st, 'decreasing')) + ' µm'}; "
+        f"distal channels boost the most synapses.",
+        "<b>Trains: one event per burst.</b> In a 50 Hz train the event occurs once; the channels stay inactivated "
+        "for the following inputs.",
+    ]
+    if study is not None:
+        items.append(
+            f"<b>Firing: depolarisation switches the boost off.</b> At rest, a single synapse fires the cell only "
+            f"from right next to the soma, even at 120 nS. A somatic bias towards threshold depolarises the dendrite and inactivates Ca<sub>LVA</sub>; "
+            f"at 95% of rheobase only distally concentrated channels (increasing gradient) let distal synapses fire "
+            f"the cell ({_range(_fired(study[0.95]['increasing']))} µm).")
+    items.append("<b>TTX is irrelevant here.</b> The dendrite has no Na<sup>+</sup> channels and single inputs stay "
+                 "below threshold, so blocking Na<sup>+</sup> channels changes nothing.")
+    return ("<section class='exec'><h2 id='summary'>Key results</h2><ol>" + "".join(f"<li>{i}</li>" for i in items)
+            + "</ol></section>")
